@@ -6,6 +6,7 @@ Tampermonkey userscripts for [Torn City](https://www.torn.com).
 
 | Script | Description | Install |
 |---|---|---|
+| [Rental Manager](scripts/rental-manager/) | Queue of rentals needing attention, with prefilled lease extensions | [Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/rental-manager/rental-manager.user.js) |
 | [Treat Counter](scripts/treat-counter/) | Live Halloween treat counter in the sidebar | [Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/treat-counter/treat-counter.user.js) |
 
 ## Installing
