@@ -1,0 +1,15 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Node (if tooling is added later)
+node_modules/
+
+# Never commit API keys or local config
+.env
+*.key
