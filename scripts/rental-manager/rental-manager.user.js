@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Rental Manager
 // @namespace    dadgum.torn.rental-manager
-// @version      3.0.1
+// @version      3.1.0
 // @description  Queue of rental properties needing attention, one-click navigation, and auto-prefilled lease extensions. Torn API v2.
 // @author       DadGum (rewrite) — based on "Easy Property Rent Extension" by IceBlueFire [776] (MIT)
 // @license      MIT
@@ -53,6 +53,8 @@
  *   - /key/info         Only when saving a key
  *
  *  Changelog
+ *   3.1.0  Card shows only on the properties list and the extend/lease tabs
+ *          (hidden on Vault and other option tabs).
  *   3.0.1  Added GitHub update/download URLs for Tampermonkey auto-updates.
  *   3.0.0  Rewrite: API v2 (Limited key works), single cached properties call,
  *          queue card UI, settings panel, no jQuery, hash routing instead of a
@@ -842,11 +844,28 @@
         refreshing: false,
 
         /**
-         * Inserts the card shell if missing.
-         * @returns {HTMLElement|null} The card, or null if the page anchor isn't there yet.
+         * Whether the card belongs on this route: the properties list (with or
+         * without a hash) and the extension/lease tabs, but no other option tabs.
+         * @param {{p: string|null, tab: string|null}} route Current route.
+         * @returns {boolean}
+         */
+        shouldShow(route) {
+            return route.p == null
+                || route.p === 'properties'
+                || route.tab === CONFIG.TABS.EXTEND
+                || route.tab === CONFIG.TABS.LEASE;
+        },
+
+        /**
+         * Inserts the card shell if missing, or removes it on routes where it doesn't belong.
+         * @returns {HTMLElement|null} The card, or null if hidden here or the page anchor isn't there yet.
          */
         ensure() {
             let card = document.getElementById(IDS.CARD);
+            if (!Card.shouldShow(readRoute())) {
+                card?.remove();
+                return null;
+            }
             if (card) return card;
             const anchor = document.querySelector(CONFIG.SELECTORS.CARD_ANCHOR);
             const wrap = document.querySelector(CONFIG.SELECTORS.PAGE_WRAP);

@@ -1,6 +1,6 @@
 # Torn Rental Manager
 
-A card on the properties page listing every rental that needs attention, with one-click navigation and prefilled lease extensions.
+A card on the properties list (and the extend/lease tabs) listing every rental that needs attention, with one-click navigation and prefilled lease extensions.
 
 **[Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/rental-manager/rental-manager.user.js)** (requires [Tampermonkey](https://www.tampermonkey.net/))
 
@@ -55,6 +55,7 @@ Every request is tagged `comment=RentalManager` so it's identifiable in your key
 
 ## Changelog
 
+- **3.1.0**: Card shows only on the properties list and the extend/lease tabs (hidden on Vault and other option tabs).
 - **3.0.1**: Added GitHub update/download URLs for auto-updates.
 - **3.0.0**: Rewrite with API v2 (Limited key works), a single cached properties call, queue card UI, settings panel, no jQuery, hash routing, fill-once inputs and full API error handling.
 - **2.3.0**: Last version of the original by IceBlueFire.
