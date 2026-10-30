@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn Treat Counter
 // @namespace    dadgum.torn.treats
-// @version      1.0.1
-// @description  Live Halloween treat counter in the Torn sidebar (current treats + total collected), powered by the Torn API v2.
+// @version      1.1.0
+// @description  Live Halloween treat counter in the Torn sidebar, powered by the Torn API v2.
 // @author       DadGum (rewrite) — based on "Treat counter" by m0tch, Grizh, Silmaril (MIT)
 // @license      MIT
 // @match        https://www.torn.com/*
@@ -25,14 +25,11 @@
  * =============================================================================
  *  TORN TREAT COUNTER
  * =============================================================================
- *  Shows "Treats: <current> · <collected>/<goal>" in the sidebar points block
- *  during the Halloween event, and keeps it up to date without opening the
- *  basket.
+ *  Shows "Treats: <current>" in the sidebar points block during the Halloween
+ *  event, and keeps it up to date without opening the basket.
  *
  *  Data sources
- *   - API  GET /user/halloween   (Minimal key) -> treats.current, treats.total
- *   - API  GET /torn/halloween   (Minimal key) -> basket upgrade requirements,
- *                                                 used only as a goal fallback
+ *   - API  GET /user/halloween   (Minimal key) -> treats.current
  *   - Page: basket view on item.php (free, instant read when you open it)
  *   - Page: attack-result treat dialog (triggers an immediate API refresh)
  *
@@ -46,10 +43,11 @@
  *   - Key access level: Minimal Access (Public Only is not enough).
  *
  *  API budget: ~1 call/min while a Torn tab is visible (shared across all open
- *  tabs), plus at most 1 extra call per 15 s after an attack treat dialog, plus
- *  1 call/day for /torn/halloween.
+ *  tabs), plus at most 1 extra call per 15 s after an attack treat dialog.
  *
  *  Changelog
+ *   1.1.0  Show only current treats. Removed the collected/goal display, the
+ *          goal logic and the /torn/halloween call.
  *   1.0.1  Added GitHub update/download URLs for Tampermonkey auto-updates.
  *   1.0.0  Clean rewrite: API polling, cross-tab shared state, settings panel,
  *          collected/goal display, full API error handling.
@@ -76,7 +74,6 @@
         FRESHNESS_SLACK_MS: 5 * 1000,      // skip a poll if another tab fetched this recently
         FORCED_REFRESH_MIN_GAP_MS: 15 * 1000,
         FORCED_REFRESH_DELAY_MS: 1500,     // give the server a moment to credit the treats
-        TORN_HALLOWEEN_TTL_MS: 24 * 60 * 60 * 1000,
 
         // Event window (UTC). Month is 0-based for Date.UTC.
         EVENT_START: { month: 9, day: 25, hour: 12 }, // Oct 25 12:00 UTC
@@ -102,8 +99,8 @@
 
         // Text patterns read from the basket view
         PATTERNS: Object.freeze({
-            AVAILABLE: /([\d,]+)\s*Treats?\b/i,                       // "124 Treats"
-            COLLECTED: /([\d,]+)\s*\/\s*([\d,]+)\s*Treats?\s+Collected/i, // "1573 / 2500 Treats Collected"
+            AVAILABLE: /([\d,]+)\s*Treats?\b/i,                           // "124 Treats"
+            COLLECTED_BAR: /[\d,]+\s*\/\s*[\d,]+\s*Treats?\s+Collected/i,  // ignored: "1573 / 2500 Treats Collected"
         }),
 
         CSS_PREFIX: 'tms-treats',
@@ -122,7 +119,7 @@
         LAST_FETCH: 'lastFetchAt',
         PAUSED_UNTIL: 'pausedUntil',
         BLOCKING_ERROR: 'blockingError',
-        TORN_HALLOWEEN: 'cache:tornHalloween',
+        LEGACY_TORN_HALLOWEEN: 'cache:tornHalloween', // used by 1.0.x; removed at startup
     });
 
     // =========================================================================
@@ -134,22 +131,14 @@
      *             basket_upgrades: Array<{id: number, timestamp: number}>}} halloween
      */
     /**
-     * @typedef {Object} TornHalloweenResponse  GET /torn/halloween
-     * @property {{basket_upgrades: Array<{id: number, name: string, description: string,
-     *             flavor: string, cost: number, requirement: number}>}} halloween
-     */
-    /**
      * @typedef {Object} KeyInfoResponse  GET /key/info (only fields we use)
      * @property {{access: {level: number, type: string}}} info
      */
     /**
      * @typedef {Object} TreatState  What we persist and render
      * @property {number|null} current    Spendable treats
-     * @property {number|null} total      Cumulative treats collected
-     * @property {number|null} goal       Next collected target (e.g. 2500)
-     * @property {'basket'|'upgrades'|null} goalSource  Where the goal came from
      * @property {number} updatedAt       Epoch ms of the last successful read
-     * @property {'api'|'page'} source    Where current/total last came from
+     * @property {'api'|'page'} source    Where current last came from
      */
 
     // =========================================================================
@@ -359,7 +348,7 @@
          * @returns {void}
          */
         clearAll() {
-            Storage.remove(KEYS.TORN_HALLOWEEN);
+            Storage.remove(KEYS.LEGACY_TORN_HALLOWEEN);
             Storage.remove(KEYS.LAST_FETCH);
             Storage.remove(KEYS.PAUSED_UNTIL);
             Storage.remove(KEYS.BLOCKING_ERROR);
@@ -496,61 +485,45 @@
     // =========================================================================
     const Data = {
         /**
-         * Validates and extracts treat counts from /user/halloween.
+         * Validates and extracts the spendable treat count from /user/halloween.
          * The endpoint is marked unstable in the spec, so check the shape.
          * @param {UserHalloweenResponse} body API body.
-         * @returns {{current: number, total: number}}
+         * @returns {number}
          * @throws {ApiError} If the shape is not what the spec describes.
          */
         parseUserHalloween(body) {
-            const treats = body?.halloween?.treats;
-            if (!Number.isFinite(treats?.current) || !Number.isFinite(treats?.total)) {
+            const current = body?.halloween?.treats?.current;
+            if (!Number.isFinite(current)) {
                 throw new ApiError(-1, 'Unexpected /user/halloween response — the API may have changed.');
             }
-            return { current: treats.current, total: treats.total };
+            return current;
         },
 
         /**
-         * Fallback goal: the smallest upgrade requirement above the total collected.
-         * ASSUMPTION (verify in game): `requirement` is a collected-treats threshold.
-         * @param {TornHalloweenResponse|null} body Cached /torn/halloween body.
-         * @param {number} total Treats collected.
+         * Reads the spendable treat count from basket text.
+         * @param {string} text innerText of the basket area.
          * @returns {number|null}
          */
-        nextRequirement(body, total) {
-            const reqs = (body?.halloween?.basket_upgrades ?? [])
-                .map((u) => u.requirement)
-                .filter((r) => Number.isFinite(r) && r > total)
-                .sort((a, b) => a - b);
-            return reqs[0] ?? null;
-        },
-
-        /**
-         * Parses basket text into counts.
-         * @param {string} text innerText of the basket area.
-         * @returns {{current: number|null, total: number|null, goal: number|null}}
-         */
         parseBasketText(text) {
-            const collected = CONFIG.PATTERNS.COLLECTED.exec(text);
-            // Remove the "x / y Treats Collected" part so AVAILABLE can't match it.
-            const rest = collected ? text.replace(collected[0], ' ') : text;
-            const available = CONFIG.PATTERNS.AVAILABLE.exec(rest);
-            return {
-                current: parseCount(available?.[1]),
-                total: parseCount(collected?.[1]),
-                goal: parseCount(collected?.[2]),
-            };
+            // Drop the "x / y Treats Collected" bar so AVAILABLE can't match its numbers.
+            const rest = text.replace(CONFIG.PATTERNS.COLLECTED_BAR, ' ');
+            return parseCount(CONFIG.PATTERNS.AVAILABLE.exec(rest)?.[1]);
         },
 
         /**
-         * Merges new values into a state object, ignoring nulls.
+         * Merges new values into a state object, ignoring nulls. Only known
+         * fields are kept, so leftovers from older versions are dropped.
          * @param {TreatState|null} prev Previous state.
          * @param {Partial<TreatState>} next New values.
          * @returns {TreatState}
          */
         merge(prev, next) {
-            const out = { current: null, total: null, goal: null, goalSource: null, updatedAt: 0, source: 'api', ...prev };
-            for (const [k, v] of Object.entries(next)) if (v != null) out[k] = v;
+            const out = {
+                current: prev?.current ?? null,
+                updatedAt: prev?.updatedAt ?? 0,
+                source: prev?.source ?? 'api',
+            };
+            for (const [k, v] of Object.entries(next)) if (v != null && k in out) out[k] = v;
             return out;
         },
     };
@@ -584,7 +557,6 @@
     GM_addStyle(`
         #${IDS.COUNTER} { cursor: pointer; display: flex; align-items: baseline; flex-wrap: wrap; gap: 0 4px; }
         #${IDS.COUNTER} .${P}-value { font-weight: bold; }
-        #${IDS.COUNTER} .${P}-progress { color: #999; font-size: 11px; }
         #${IDS.COUNTER}.${P}-error .${P}-value { color: #e06c5a; }
         #${IDS.COUNTER}.${P}-stale .${P}-value { opacity: .6; }
         #${IDS.TOOLTIP} {
@@ -646,7 +618,6 @@
             const row = el('p', { id: IDS.COUNTER, className: nativeRow?.className ?? '' }, [
                 el('span', { className: nativeLabel?.className ?? '', textContent: 'Treats:' }),
                 el('span', { className: `${P}-value`, textContent: '…' }),
-                el('span', { className: `${P}-progress` }),
             ]);
             row.addEventListener('mouseenter', () => UI.showTooltip(row));
             row.addEventListener('mouseleave', UI.hideTooltip);
@@ -676,14 +647,7 @@
             if (!row) return;
             const state = State.read();
             const value = row.querySelector(`.${P}-value`);
-            const progress = row.querySelector(`.${P}-progress`);
-
             value.textContent = state?.current != null ? fmt(state.current) : UI.errorMessage ? '⚠' : '…';
-            if (state?.total != null) {
-                progress.textContent = state.goal ? `· ${fmt(state.total)}/${fmt(state.goal)}` : `· ${fmt(state.total)}`;
-            } else {
-                progress.textContent = '';
-            }
 
             const stale = !state?.updatedAt || Date.now() - state.updatedAt > CONFIG.POLL_INTERVAL_MS * 3;
             row.classList.toggle(`${P}-error`, Boolean(UI.errorMessage));
@@ -699,9 +663,7 @@
             UI.hideTooltip();
             const s = State.read();
             const lines = [
-                `Available: ${fmt(s?.current ?? null)}`,
-                `Collected: ${fmt(s?.total ?? null)}${s?.goal ? ` / ${fmt(s.goal)}` : ''}`,
-                s?.goalSource === 'upgrades' ? 'Goal: next upgrade requirement (estimate)' : null,
+                `Treats: ${fmt(s?.current ?? null)}`,
                 `Updated ${timeAgo(s?.updatedAt)} (${s?.source ?? '—'})`,
                 UI.errorMessage ? `⚠ ${UI.errorMessage}` : null,
                 'Click for settings',
@@ -867,10 +829,8 @@
             Poller.inFlight = true;
             Storage.set(KEYS.LAST_FETCH, Date.now()); // claim the slot so other tabs skip
             try {
-                const { current, total } = Data.parseUserHalloween(await Api.get('/user/halloween'));
-                const prev = State.read();
-                const goalPatch = await Poller.resolveGoal(prev, total);
-                State.update({ current, total, ...goalPatch, source: 'api' });
+                const current = Data.parseUserHalloween(await Api.get('/user/halloween'));
+                State.update({ current, source: 'api' });
                 UI.setError(null);
             } catch (err) {
                 Poller.handleError(err);
@@ -878,29 +838,6 @@
                 Poller.inFlight = false;
                 UI.render();
             }
-        },
-
-        /**
-         * Keeps a basket-read goal while it's still ahead of total; otherwise
-         * falls back to the next upgrade requirement from /torn/halloween.
-         * @param {TreatState|null} prev Previous state.
-         * @param {number} total Current collected total.
-         * @returns {Promise<Partial<TreatState>>}
-         */
-        async resolveGoal(prev, total) {
-            if (prev?.goalSource === 'basket' && prev.goal > total) return {};
-            let upgrades = Cache.get(KEYS.TORN_HALLOWEEN, CONFIG.TORN_HALLOWEEN_TTL_MS);
-            if (!upgrades) {
-                try {
-                    upgrades = await Api.get('/torn/halloween');
-                    Cache.set(KEYS.TORN_HALLOWEEN, upgrades);
-                } catch (err) {
-                    log('Goal lookup failed', err.code, err.message);
-                    return {};
-                }
-            }
-            const goal = Data.nextRequirement(upgrades, total);
-            return goal ? { goal, goalSource: 'upgrades' } : {};
         },
 
         /**
@@ -971,18 +908,10 @@
             const read = throttle(() => {
                 const available = wrap.querySelector(CONFIG.SELECTORS.BASKET_AVAILABLE);
                 if (!available) return;
-                // The collected bar sits near .available-treats; scan its container.
-                const scope = available.parentElement ?? available;
-                const parsed = Data.parseBasketText(scope.innerText);
-                if (parsed.current == null && parsed.total == null) return;
-                const prev = State.read();
-                if (prev?.current === parsed.current && prev?.total === parsed.total && prev?.goal === parsed.goal) return;
-                log('Basket read', parsed);
-                State.update({
-                    ...parsed,
-                    goalSource: parsed.goal != null ? 'basket' : undefined,
-                    source: 'page',
-                });
+                const current = Data.parseBasketText(available.innerText);
+                if (current == null || State.read()?.current === current) return;
+                log('Basket read', current);
+                State.update({ current, source: 'page' });
             }, CONFIG.OBSERVER_DEBOUNCE_MS);
             new MutationObserver(read).observe(wrap, { childList: true, subtree: true });
             read();
@@ -1024,6 +953,10 @@
             UI.notice('Cache cleared.');
             Poller.refresh({ force: true });
         });
+
+        // Clean up data left by 1.0.x (goal cache, collected/goal fields in state).
+        Storage.remove(KEYS.LEGACY_TORN_HALLOWEEN);
+        if (State.read()) Storage.set(KEYS.STATE, Data.merge(State.read(), {}));
 
         // Any tab's update re-renders every tab.
         Storage.onChange(KEYS.STATE, () => UI.render());

@@ -1,9 +1,9 @@
 # Torn Treat Counter
 
-Live Halloween treat counter in the Torn sidebar. Shows your current treats and total collected without opening your basket.
+Live Halloween treat counter in the Torn sidebar. Shows how many treats you have without opening your basket.
 
 ```
-Treats: 124 · 1,573/2,500
+Treats: 134
 ```
 
 **[Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/treat-counter/treat-counter.user.js)** (requires [Tampermonkey](https://www.tampermonkey.net/))
@@ -14,7 +14,7 @@ Treats: 124 · 1,573/2,500
 - One shared poll across all open Torn tabs, so more tabs don't mean more API calls
 - Instant refresh after an attack awards treats
 - Free, instant update when you open your basket (no API call)
-- Hover for details (available, collected, goal, last update); click for settings
+- Hover to see when it last updated; click for settings
 - Only runs during the Halloween event window (Oct 25 – Nov 1, 12:00 UTC)
 
 ## Setup
@@ -30,7 +30,6 @@ You can reopen settings by clicking the counter or from the Tampermonkey menu.
 | Endpoint | Key level | Frequency |
 |---|---|---|
 | `GET /user/halloween` | Minimal | ~1/min, plus at most 1 per 15 s after attack treats |
-| `GET /torn/halloween` | Minimal | ~1/day (goal fallback) |
 | `GET /key/info` | Any | Only when saving a key |
 
 Every request is tagged `comment=TreatCounter` so it's identifiable in your key log.
@@ -47,12 +46,12 @@ Every request is tagged `comment=TreatCounter` so it's identifiable in your key 
 
 ## Known limitations
 
-- The collected goal (e.g. 2,500) is read from your basket when you open it. Until then, it's estimated from the next basket upgrade requirement, and the tooltip marks it as an estimate.
 - `/user/halloween` is marked unstable in Torn's API spec. If the response changes, the counter shows a warning instead of a wrong number.
 - Attack detection relies on the `.dialog-title__halloween` element on the attack page.
 
 ## Changelog
 
+- **1.1.0**: Show only current treats; removed the collected/goal display and the `/torn/halloween` call.
 - **1.0.1**: Added GitHub update/download URLs for auto-updates.
 - **1.0.0**: Clean rewrite with API polling, cross-tab shared state, settings panel, collected/goal display, and full API error handling.
 
