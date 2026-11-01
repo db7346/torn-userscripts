@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn Armory Notes
 // @namespace    dadgum.torn.armorynotes
-// @version      1.0.0
-// @description  Attach a colored label and a private note to individual weapons and armor (keyed by armory ID) on the Items page and the Faction Armory.
+// @version      2.0.0
+// @description  Colored labels and notes on individual weapons and armor (keyed by armory ID). Private notes on the Items page; shared faction notes in the Faction Armory.
 // @author       DadGum
 // @license      MIT
 // @match        https://www.torn.com/item.php*
@@ -11,6 +11,8 @@
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
 // @grant        GM_addStyle
+// @grant        GM_xmlhttpRequest
+// @connect      workers.dev
 // @run-at       document-idle
 // @homepageURL  https://github.com/db7346/torn-userscripts/tree/main/scripts/armory-notes
 // @supportURL   https://github.com/db7346/torn-userscripts/issues
@@ -25,8 +27,15 @@
  *   Adds a small tag button next to every Primary, Secondary, Melee and
  *   Defensive (armor) item that has an armory ID. Click it to attach a short
  *   colored label and a free-text note. Notes are keyed by the item's unique
- *   armory ID, so they follow that exact weapon between your inventory and
- *   the faction armory. Hover a label to read the full note.
+ *   armory ID, so they follow that exact weapon. Hover a label to read the
+ *   full note.
+ *
+ *   Two kinds of notes:
+ *   - Local notes (Items page): private, stored only in this browser.
+ *   - Faction notes (Faction Armory): stored on your faction's notes server
+ *     (a Cloudflare Worker your faction runs) and seen by every member who
+ *     uses this script. Only members listed as editors can change them.
+ *     If no server is set up, the Faction Armory uses local notes (v1 mode).
  *
  * Pages
  *   - item.php                       (rows view and thumbnail view)
@@ -35,22 +44,42 @@
  * Author: DadGum
  *
  * Changelog
+ *   2.0.0 (2026-11-01) Shared faction notes: Faction Armory notes live on the
+ *                      faction's server, refresh every 45 s while visible,
+ *                      editors-only editing with "last edited by". Settings
+ *                      panel (server URL + Public API key), upload (move)
+ *                      local notes to the faction, faction notes shown
+ *                      read-only on the Items page.
  *   1.0.0 (2026-11-01) Initial release: labels + notes per armory ID,
  *                      Items page (rows + thumbnails), Faction Armory,
  *                      JSON export / import (merge or replace), clear all.
  *
  * Torn API key usage disclosure
- *   - Key access level: NONE. This script never asks for, stores, or uses an
- *     API key and makes no API calls (0 calls/min).
- *   - Data storage: labels and notes you type are stored only in Tampermonkey
- *     storage in this browser (GM_setValue). Nothing is stored remotely.
- *   - Data sharing: none. The script makes no network requests of any kind.
- *   - Purpose of use: personal annotation of your own / your faction's items.
- *   - Key storage & sharing: not applicable (no key).
+ *   - Key access level: PUBLIC. Only needed for faction notes; local notes
+ *     work with no key at all.
+ *   - Data storage:
+ *       In this browser (Tampermonkey storage): your local notes, your API
+ *       key, the server URL, a sign-in token, and a cache of faction notes.
+ *       On your faction's notes server (Cloudflare D1): faction notes and,
+ *       for each change, the editor's Torn player ID and name. Your API key
+ *       is NOT stored on the server.
+ *   - Data sharing: faction notes are visible to members of your faction who
+ *     use this script. Nothing is shared with anyone else.
+ *   - Purpose of use: annotating your own and your faction's items.
+ *   - Key storage & sharing: the key stays in Tampermonkey storage. It is sent
+ *     only over HTTPS, in the body of the sign-in request, to the faction
+ *     server set in Settings (about once every 12 hours). The server uses it
+ *     for one Torn API call (user basic,faction) to confirm who you are and
+ *     that you are in the faction, then forgets it. The key is never logged
+ *     and never put in a URL.
+ *   - API calls: Torn API about 1 per 12 hours (sign-in, made by the server).
+ *     Faction server about 1.3 per minute while the Faction Armory is open
+ *     and visible; none otherwise.
  *
  * Game-rule compliance
  *   Read-only helper. The script never clicks, equips, loans, sends, sells or
  *   otherwise acts in the game. It only reads item rows and adds its own UI.
+ *   Network requests go only to the faction notes server, never to Torn.
  * ========================================================================== */
 
 (function () {
@@ -94,6 +123,88 @@
             Object.freeze({ key: 'purple', name: 'Purple', bg: '#a371f7', fg: '#ffffff' }),
             Object.freeze({ key: 'gray', name: 'Gray', bg: '#8b949e', fg: '#0d1117' }),
         ]),
+
+        /* ---- Faction sharing ---------------------------------------------- */
+
+        /**
+         * Your faction's notes server (the Cloudflare Worker URL, e.g.
+         * "https://torn-armory-notes.yourname.workers.dev"). Fill this in before
+         * sharing the script so members only have to enter their key. Leave
+         * empty to start with sharing off; members can still set it in Settings.
+         */
+        DEFAULT_SERVER_URL: '',
+        SETTINGS_KEY: 'tms-armorynotes:settings:v1',
+        SESSION_KEY: 'tms-armorynotes:session:v1',
+        SHARED_CACHE_KEY: 'tms-armorynotes:shared:v1',
+        SEEN_FACTION_KEY: 'tms-armorynotes:seen:v1',
+        SETUP_PROMPTED_KEY: 'tms-armorynotes:setup-prompted:v1',
+        SHARED_CACHE_VERSION: 1,
+        /** Server URLs must be HTTPS with no query or fragment. */
+        SERVER_URL_PATTERN: /^https:\/\/[A-Za-z0-9.-]+(?::\d+)?(?:\/[^\s?#]*)?$/,
+        API_KEY_PATTERN: /^[A-Za-z0-9]{16}$/,
+
+        /** Faction Armory refresh interval while the tab is visible. */
+        SHARED_POLL_MS: 45000,
+        /** Items page: refresh the faction-note cache if older than this. */
+        ITEMS_SHARED_MAX_AGE_MS: 60 * 1000,
+        /** Sign in again this long before the session token expires. */
+        TOKEN_RENEW_MARGIN_MS: 5 * 60 * 1000,
+        REQUEST_TIMEOUT_MS: 15000,
+        /** Wait after "too many requests" or a network failure. */
+        BACKOFF_MS: 60000,
+        /** Our own cap on requests to the notes server (sliding 60 s window). */
+        SERVER_RATE_LIMIT: Object.freeze({ MAX: 30, WINDOW_MS: 60000 }),
+        /** Max pages fetched in one refresh (server returns up to 5000 notes per page). */
+        SHARED_MAX_PAGES: 5,
+        /** Notes per upload request (server accepts up to 1000). */
+        UPLOAD_CHUNK: 500,
+        /** Armory IDs remembered from the faction armory (pre-ticks the upload list). */
+        SEEN_MAX: 5000,
+        SEEN_FLUSH_MS: 2000,
+        EDITOR_NAME_MAX: 40,
+
+        /**
+         * Torn API error codes (ApiError schema, Torn API v2). The server passes
+         * Torn's code through when sign-in fails; these are the messages shown.
+         */
+        TORN_ERRORS: Object.freeze({
+            0: 'Unknown Torn API error.',
+            1: 'API key is empty. Enter your key in Settings.',
+            2: 'Incorrect API key. Re-enter it in Settings.',
+            3: 'Wrong request type (script bug, please report).',
+            4: 'Wrong fields requested (script bug, please report).',
+            5: 'Too many API requests. Waiting a minute before trying again.',
+            6: 'Incorrect ID.',
+            7: 'Incorrect ID-entity relation.',
+            8: 'Your IP is temporarily blocked by Torn for abuse.',
+            9: 'The Torn API is disabled right now. Try again later.',
+            10: 'Key owner is in federal jail.',
+            11: 'Key change cooldown. Try again in a moment.',
+            12: 'Torn could not read the key. Try again shortly.',
+            13: 'API key is temporarily disabled because the owner is inactive.',
+            14: 'Daily read limit reached for this key.',
+            15: 'Log is temporarily unavailable.',
+            16: 'Key access level too low. A Public key (or higher) is required.',
+            17: 'Torn API backend error. Try again later.',
+            18: 'API key is paused by its owner.',
+            19: 'Must migrate to Crimes 2.0.',
+            20: 'Race not finished.',
+            21: 'Incorrect category.',
+            22: 'Selection only available in API v1.',
+            23: 'Selection only available in API v2.',
+            24: 'This Torn API endpoint is closed temporarily.',
+            25: 'Invalid stat requested.',
+            26: 'Only a category or stats are allowed.',
+            27: 'Must migrate to Organized Crimes 2.0.',
+            28: 'Incorrect log ID.',
+            29: 'Category selection unavailable for interaction logs.',
+            30: 'File does not exist.',
+            31: 'City stats are unavailable right now.',
+            32: 'Endpoint closed until the attacking period.',
+            33: 'No competition available.',
+        }),
+        /** Torn codes worth retrying later; all others need the user to act. */
+        TORN_TRANSIENT_CODES: Object.freeze([0, 5, 9, 11, 12, 15, 17, 24]),
 
         OBSERVER_DEBOUNCE_MS: 150,
         WAIT_FOR_TIMEOUT_MS: 15000,
@@ -144,6 +255,14 @@
         kindPill: `${PREFIX}-btn--pill`,
         kindBadge: `${PREFIX}-btn--badge`,
         kindFaction: `${PREFIX}-btn--faction`,
+        kindShared: `${PREFIX}-btn--shared`,
+        btnHidden: `${PREFIX}-btn--hidden`,
+        btnReadOnly: `${PREFIX}-btn--ro`,
+        popMeta: `${PREFIX}-pop-meta`,
+        checklist: `${PREFIX}-checklist`,
+        checkRow: `${PREFIX}-check`,
+        linkRow: `${PREFIX}-links`,
+        status: `${PREFIX}-status`,
         label: `${PREFIX}-label`,
         icon: `${PREFIX}-icon`,
         thumbHost: `${PREFIX}-thost`,
@@ -182,6 +301,8 @@
     const DATA_ITEM = 'tmsAnItem';
     const DATA_KIND = 'tmsAnKind';
     const DATA_SIG = 'tmsAnSig';
+    const DATA_SRC = 'tmsAnSrc'; // 'local' | 'shared'
+    const TORN_TRANSIENT = new Set(CONFIG.TORN_TRANSIENT_CODES);
 
     /**
      * Debug logger, silent unless CONFIG.DEBUG is true.
@@ -215,9 +336,59 @@
      */
 
     /**
+     * A faction (shared) note: a Note plus who last changed it.
+     * @typedef {Note & {updatedById: number, updatedByName: string}} SharedNote
+     */
+
+    /**
+     * A note as returned by the notes server (GET /notes, PUT/DELETE /notes/:id).
+     * @typedef {Object} ServerNote
+     * @property {string} armoryId
+     * @property {string} label
+     * @property {string} color
+     * @property {string} text
+     * @property {string} itemName
+     * @property {string} itemId
+     * @property {number} updated        - Server epoch ms.
+     * @property {number} updatedById
+     * @property {string} updatedByName
+     * @property {boolean} deleted       - Tombstone (note was deleted).
+     */
+
+    /**
+     * Signed-in session returned by POST /auth (stored locally; contains no API key).
+     * @typedef {Object} Session
+     * @property {string} token
+     * @property {number} expiresAt                  - Epoch ms.
+     * @property {{id: number, name: string}} player
+     * @property {{id: number, name: string}} faction
+     * @property {boolean} canEdit
+     * @property {string} serverUrl                  - Server this token belongs to.
+     */
+
+    /**
+     * Local settings.
+     * @typedef {Object} Settings
+     * @property {string} serverUrl - Notes server base URL ('' = sharing off).
+     * @property {string} apiKey    - Torn Public API key ('' = not set).
+     */
+
+    /**
+     * A note source used by buttons and the editor.
+     * @typedef {Object} NoteSource
+     * @property {'local'|'shared'} kind
+     * @property {(id: string) => (Note|SharedNote|null)} get
+     * @property {() => Object<string, Note>} notes
+     * @property {() => boolean} canEdit
+     * @property {(id: string, fields: Object) => Promise<void>} save
+     * @property {(id: string) => Promise<void>} remove
+     */
+
+    /**
      * Where and how a note button is mounted inside a row.
      * @typedef {Object} MountSpec
-     * @property {string} kind                                  - 'pill' | 'badge' | 'faction'.
+     * @property {string} kind                                  - 'pill' | 'badge' | 'faction' | 'shared'.
+     * @property {() => ('local'|'shared')} source              - Which notes this button shows.
      * @property {(row: Element) => (Element|null)} findHost   - Locates the host element.
      * @property {(host: Element, btn: HTMLElement) => void} attach - Inserts the button.
      */
@@ -265,6 +436,22 @@
          */
         write(key, value) {
             GM_setValue(key, JSON.stringify(value));
+        },
+
+        /**
+         * Like read(), but returns the fallback for unreadable data instead of
+         * throwing (for caches and settings that can safely start over).
+         * @param {string} key - Storage key.
+         * @param {*} fallback - Returned when nothing usable is stored.
+         * @returns {*} The parsed value or the fallback.
+         */
+        readSafe(key, fallback) {
+            try {
+                return Storage.read(key, fallback);
+            } catch (err) {
+                log(`Ignoring unreadable stored value for ${key}`);
+                return fallback;
+            }
         },
     };
 
@@ -437,6 +624,81 @@
             return CONFIG.COLORS.find((c) => c.key === key)
                 ?? CONFIG.COLORS.find((c) => c.key === CONFIG.DEFAULT_COLOR);
         },
+
+        /**
+         * Sanitize a note from the server (or the local faction-note cache).
+         * @param {unknown} raw - Candidate ServerNote.
+         * @returns {{id: string, updated: number, note: (SharedNote|null)}|null}
+         *   null if unusable; note is null for a deletion (tombstone).
+         */
+        normalizeSharedNote(raw) {
+            if (!raw || typeof raw !== 'object') return null;
+            const id = String(raw.armoryId ?? '');
+            const updated = Number(raw.updated);
+            if (!Data.isValidArmoryId(id) || !Number.isFinite(updated) || updated <= 0) return null;
+            if (raw.deleted) return { id, updated, note: null };
+            const base = Data.normalizeNote({ ...raw, updated });
+            if (!base) return { id, updated, note: null };
+            const byId = Number(raw.updatedById);
+            return {
+                id,
+                updated,
+                note: {
+                    ...base,
+                    updatedById: Number.isInteger(byId) && byId > 0 ? byId : 0,
+                    updatedByName: String(raw.updatedByName ?? '').slice(0, CONFIG.EDITOR_NAME_MAX),
+                },
+            };
+        },
+
+        /**
+         * Validate and tidy a notes-server URL typed by the user.
+         * @param {string} text - Raw input.
+         * @returns {string} URL without trailing slash, or '' when empty.
+         * @throws {Error} If not an https:// URL without query/fragment.
+         */
+        normalizeServerUrl(text) {
+            const url = String(text ?? '').trim().replace(/\/+$/, '');
+            if (!url) return '';
+            if (!CONFIG.SERVER_URL_PATTERN.test(url)) {
+                throw new Error('Server URL must look like https://name.workers.dev (https only, no ? or #).');
+            }
+            return url;
+        },
+
+        /**
+         * Check the shape of a Torn API key (does not prove it works).
+         * @param {string} key - Candidate key.
+         * @returns {boolean} True for 16 letters/digits.
+         */
+        isApiKeyFormat(key) {
+            return CONFIG.API_KEY_PATTERN.test(String(key ?? ''));
+        },
+
+        /**
+         * Human "time ago" text.
+         * @param {number} ms - Past epoch ms.
+         * @param {number} now - Current epoch ms.
+         * @returns {string} e.g. "just now", "5 min ago", "3 h ago", "2 d ago".
+         */
+        relativeTime(ms, now) {
+            const s = Math.max(0, Math.round((now - ms) / 1000));
+            if (s < 45) return 'just now';
+            const m = Math.round(s / 60);
+            if (m < 60) return `${m} min ago`;
+            const h = Math.round(m / 60);
+            if (h < 48) return `${h} h ago`;
+            return `${Math.round(h / 24)} d ago`;
+        },
+
+        /**
+         * Readable message for a Torn API error code.
+         * @param {number} code - ApiError code.
+         * @returns {string} Message.
+         */
+        tornErrorMessage(code) {
+            return CONFIG.TORN_ERRORS[code] ?? `Torn API error ${code}.`;
+        },
     };
 
     /* =========================================================================
@@ -581,14 +843,620 @@
         clear() {
             this._mutate(() => ({}), { overwrite: true });
         },
+
+        /**
+         * Delete several notes at once (after a successful upload).
+         * @param {string[]} ids - Armory IDs.
+         * @returns {void}
+         */
+        removeMany(ids) {
+            if (!ids.length) return;
+            this._mutate((notes) => {
+                for (const id of ids) delete notes[id];
+            });
+        },
+    };
+
+    /* ---- Settings (server URL + API key) ---------------------------------- */
+
+    const SettingsStore = {
+        /** @type {Settings|null} Memory copy (settings change only through set()). */
+        _mem: null,
+
+        /**
+         * Current settings (defaults filled in).
+         * @returns {Settings} Settings (treat as read-only).
+         */
+        get() {
+            if (!this._mem) {
+                const raw = Storage.readSafe(CONFIG.SETTINGS_KEY, null) ?? {};
+                this._mem = Object.freeze({
+                    serverUrl: typeof raw.serverUrl === 'string' ? raw.serverUrl : CONFIG.DEFAULT_SERVER_URL,
+                    apiKey: typeof raw.apiKey === 'string' ? raw.apiKey : '',
+                });
+            }
+            return this._mem;
+        },
+
+        /**
+         * Save settings.
+         * @param {Settings} settings - New settings (already validated).
+         * @returns {void}
+         */
+        set(settings) {
+            Storage.write(CONFIG.SETTINGS_KEY, { serverUrl: settings.serverUrl, apiKey: settings.apiKey });
+            this._mem = null;
+        },
+    };
+
+    /* ---- Faction notes cache ----------------------------------------------- */
+    // In-memory copy of the faction notes, persisted to GM storage so pages
+    // render instantly and still show notes while the server is unreachable.
+
+    const SharedStore = {
+        /** @type {Object<string, SharedNote>} */
+        _notes: {},
+        /** Highest server `updated` seen; next poll asks for changes since then. */
+        _since: 0,
+        _fetchedAt: 0,
+        _serverUrl: '',
+        /** @type {Promise<string[]>|null} */
+        _inflight: null,
+
+        /**
+         * Load the cache for the configured server (discarded if for another server).
+         * @returns {void}
+         */
+        load() {
+            const url = SettingsStore.get().serverUrl;
+            this._reset(url);
+            const c = Storage.readSafe(CONFIG.SHARED_CACHE_KEY, null);
+            if (!c || c.version !== CONFIG.SHARED_CACHE_VERSION || c.serverUrl !== url || !url) return;
+            if (!c.notes || typeof c.notes !== 'object') return;
+            for (const [id, value] of Object.entries(c.notes)) {
+                const n = Data.normalizeSharedNote({ ...value, armoryId: id });
+                if (n?.note) this._notes[id] = n.note;
+            }
+            this._since = Number.isFinite(c.since) ? c.since : 0;
+            this._fetchedAt = Number.isFinite(c.fetchedAt) ? c.fetchedAt : 0;
+        },
+
+        /**
+         * Empty the in-memory cache.
+         * @param {string} serverUrl - Server the cache now belongs to.
+         * @returns {void}
+         */
+        _reset(serverUrl) {
+            this._notes = {};
+            this._since = 0;
+            this._fetchedAt = 0;
+            this._serverUrl = serverUrl;
+        },
+
+        /**
+         * Delete the cache from memory and storage.
+         * @returns {void}
+         */
+        clear() {
+            this._reset(SettingsStore.get().serverUrl);
+            Storage.write(CONFIG.SHARED_CACHE_KEY, null);
+        },
+
+        /**
+         * Persist the cache.
+         * @returns {void}
+         */
+        _persist() {
+            Storage.write(CONFIG.SHARED_CACHE_KEY, {
+                version: CONFIG.SHARED_CACHE_VERSION,
+                serverUrl: this._serverUrl,
+                since: this._since,
+                fetchedAt: this._fetchedAt,
+                notes: this._notes,
+            });
+        },
+
+        /**
+         * Faction note for an armory ID.
+         * @param {string} id - Armory ID.
+         * @returns {SharedNote|null} Note or null.
+         */
+        get(id) {
+            return this._notes[id] ?? null;
+        },
+
+        /**
+         * All cached faction notes (treat as read-only).
+         * @returns {Object<string, SharedNote>} Notes by armory ID.
+         */
+        notes() {
+            return this._notes;
+        },
+
+        /**
+         * Epoch ms of the last successful refresh (0 = never).
+         * @returns {number} Timestamp.
+         */
+        fetchedAt() {
+            return this._fetchedAt;
+        },
+
+        /**
+         * Apply server notes (including deletions) to the cache.
+         * @param {unknown[]} list - ServerNote objects.
+         * @returns {string[]} Armory IDs whose note changed.
+         */
+        apply(list) {
+            const changed = [];
+            for (const raw of list) {
+                const n = Data.normalizeSharedNote(raw);
+                if (!n) continue;
+                this._since = Math.max(this._since, n.updated);
+                const prev = this._notes[n.id];
+                if (!n.note) {
+                    if (prev) {
+                        delete this._notes[n.id];
+                        changed.push(n.id);
+                    }
+                } else if (!prev || Data.noteSignature(prev) !== Data.noteSignature(n.note) || prev.updatedById !== n.note.updatedById) {
+                    this._notes[n.id] = n.note;
+                    changed.push(n.id);
+                }
+            }
+            return changed;
+        },
+
+        /**
+         * Fetch changes from the server (one request at a time).
+         * @returns {Promise<string[]>} Armory IDs whose note changed.
+         * @throws {ServerError} On server/network/auth failure.
+         */
+        refresh() {
+            if (!this._inflight) {
+                this._inflight = this._refresh().finally(() => {
+                    this._inflight = null;
+                });
+            }
+            return this._inflight;
+        },
+
+        /**
+         * Refresh implementation (pages through results if the server has more).
+         * @returns {Promise<string[]>} Changed IDs.
+         */
+        async _refresh() {
+            const url = SettingsStore.get().serverUrl;
+            if (url !== this._serverUrl) this._reset(url);
+            const changed = [];
+            for (let page = 0; page < CONFIG.SHARED_MAX_PAGES; page += 1) {
+                const data = await Server.request('GET', `/notes?since=${encodeURIComponent(String(this._since))}`);
+                if (!data || !Array.isArray(data.notes)) throw new ServerError('bad_response', 'Unexpected response from the notes server.');
+                changed.push(...this.apply(data.notes));
+                if (typeof data.canEdit === 'boolean') Session.setCanEdit(data.canEdit);
+                if (!data.hasMore) break;
+            }
+            this._fetchedAt = Date.now();
+            this._persist();
+            return changed;
+        },
+
+        /**
+         * Create or update a faction note (editors only; server enforces it).
+         * @param {string} id - Armory ID.
+         * @param {{label: string, color: string, text: string, itemName: string, itemId: string}} fields - Note fields.
+         * @returns {Promise<void>}
+         * @throws {ServerError} On failure.
+         */
+        async save(id, fields) {
+            const data = await Server.request('PUT', `/notes/${encodeURIComponent(id)}`, { body: fields });
+            this.apply([data?.note]);
+            this._persist();
+        },
+
+        /**
+         * Delete a faction note (editors only).
+         * @param {string} id - Armory ID.
+         * @returns {Promise<void>}
+         * @throws {ServerError} On failure.
+         */
+        async remove(id) {
+            const data = await Server.request('DELETE', `/notes/${encodeURIComponent(id)}`);
+            this.apply([data?.note ?? { armoryId: id, deleted: true, updated: Date.now() }]);
+            this._persist();
+        },
+
+        /**
+         * Upload notes; the server never overwrites an existing faction note.
+         * @param {Array<Note & {armoryId: string}>} notes - Notes to upload.
+         * @returns {Promise<{added: string[], skipped: string[], invalid: string[]}>} Result.
+         * @throws {ServerError} On failure (earlier chunks may already be saved).
+         */
+        async importNotes(notes) {
+            const result = { added: [], skipped: [], invalid: [] };
+            for (let i = 0; i < notes.length; i += CONFIG.UPLOAD_CHUNK) {
+                const chunk = notes.slice(i, i + CONFIG.UPLOAD_CHUNK).map((n) => ({
+                    armoryId: n.armoryId, label: n.label, color: n.color, text: n.text, itemName: n.itemName, itemId: n.itemId,
+                }));
+                const data = await Server.request('POST', '/notes/import', { body: { notes: chunk } });
+                for (const key of ['added', 'skipped', 'invalid']) {
+                    if (Array.isArray(data?.[key])) result[key].push(...data[key].map(String));
+                }
+            }
+            return result;
+        },
+    };
+
+    /* ---- Armory IDs seen in the faction armory ---------------------------- */
+    // Only used to pre-tick the "Upload local notes" list.
+
+    const SeenIds = {
+        /** @type {Set<string>|null} */
+        _set: null,
+        _flush: null,
+
+        /**
+         * Lazily load the set.
+         * @returns {Set<string>} Seen IDs.
+         */
+        _load() {
+            if (!this._set) {
+                const arr = Storage.readSafe(CONFIG.SEEN_FACTION_KEY, []);
+                this._set = new Set(Array.isArray(arr) ? arr.filter((id) => Data.isValidArmoryId(id)) : []);
+                this._flush = debounce(() => {
+                    Storage.write(CONFIG.SEEN_FACTION_KEY, [...this._set].slice(-CONFIG.SEEN_MAX));
+                }, CONFIG.SEEN_FLUSH_MS);
+            }
+            return this._set;
+        },
+
+        /**
+         * Remember an armory ID (saved shortly after).
+         * @param {string} id - Armory ID.
+         * @returns {void}
+         */
+        add(id) {
+            const set = this._load();
+            if (set.has(id)) return;
+            set.add(id);
+            this._flush();
+        },
+
+        /**
+         * Whether an ID has been seen in the faction armory.
+         * @param {string} id - Armory ID.
+         * @returns {boolean} True if seen.
+         */
+        has(id) {
+            return this._load().has(id);
+        },
     };
 
     /* =========================================================================
-     * API
+     * API (faction notes server)
      * -------------------------------------------------------------------------
-     * Intentionally empty: this script needs no Torn API data. Everything it
-     * uses (armory ID, item ID, name, category) is already in the page.
+     * The script never calls api.torn.com itself. It talks only to the
+     * faction's notes server, which makes the one Torn API call needed to
+     * verify a member at sign-in (GET /v2/user?selections=basic,faction,
+     * Public key, comment=ArmoryNotes).
      * ====================================================================== */
+
+    /** Error from the notes server, the network, or sign-in. */
+    class ServerError extends Error {
+        /**
+         * @param {string} code - Machine code (server code, or 'network', 'timeout', ...).
+         * @param {string} message - Readable message.
+         * @param {Object} [extra] - { status, tornCode, needsKey, transient }.
+         */
+        constructor(code, message, extra = {}) {
+            super(message);
+            this.name = 'ServerError';
+            this.code = code;
+            this.status = extra.status ?? 0;
+            this.tornCode = extra.tornCode;
+            /** True when the user must fix their key in Settings. */
+            this.needsKey = Boolean(extra.needsKey);
+            /** True when retrying later may succeed. */
+            this.transient = Boolean(extra.transient);
+        }
+    }
+
+    /**
+     * Promise wrapper around GM_xmlhttpRequest.
+     * @param {{method: string, url: string, headers: Object<string,string>, body?: string}} req - Request.
+     * @returns {Promise<{status: number, text: string}>} Response.
+     * @throws {ServerError} On network failure or timeout.
+     */
+    function gmRequest(req) {
+        return new Promise((resolve, reject) => {
+            GM_xmlhttpRequest({
+                method: req.method,
+                url: req.url,
+                headers: req.headers,
+                data: req.body,
+                timeout: CONFIG.REQUEST_TIMEOUT_MS,
+                onload: (res) => resolve({ status: res.status, text: res.responseText ?? '' }),
+                onerror: () => reject(new ServerError('network', 'Could not reach the faction notes server.', { transient: true })),
+                ontimeout: () => reject(new ServerError('timeout', 'The faction notes server did not respond in time.', { transient: true })),
+                onabort: () => reject(new ServerError('aborted', 'Request was cancelled.', { transient: true })),
+            });
+        });
+    }
+
+    /** Sliding-window rate limiter: waits until a slot is free. */
+    class RateLimiter {
+        /**
+         * @param {number} max - Requests allowed per window.
+         * @param {number} windowMs - Window length.
+         */
+        constructor(max, windowMs) {
+            this.max = max;
+            this.windowMs = windowMs;
+            /** @type {number[]} */
+            this.stamps = [];
+            this.chain = Promise.resolve();
+        }
+
+        /**
+         * Reserve a slot (requests are released in order).
+         * @returns {Promise<void>} Resolves when the request may go.
+         */
+        acquire() {
+            const take = async () => {
+                for (;;) {
+                    const now = Date.now();
+                    this.stamps = this.stamps.filter((t) => now - t < this.windowMs);
+                    if (this.stamps.length < this.max) {
+                        this.stamps.push(now);
+                        return;
+                    }
+                    await new Promise((r) => setTimeout(r, this.windowMs - (now - this.stamps[0]) + 10));
+                }
+            };
+            const slot = this.chain.then(take);
+            this.chain = slot.catch(() => {});
+            return slot;
+        }
+    }
+
+    const Server = {
+        _limiter: new RateLimiter(CONFIG.SERVER_RATE_LIMIT.MAX, CONFIG.SERVER_RATE_LIMIT.WINDOW_MS),
+
+        /**
+         * Call the notes server.
+         * @param {'GET'|'POST'|'PUT'|'DELETE'} method - HTTP method.
+         * @param {string} path - Path starting with '/'.
+         * @param {Object} [opts] - Options.
+         * @param {Object} [opts.body] - JSON body.
+         * @param {boolean} [opts.auth=true] - Attach the session token (signing in if needed).
+         * @param {boolean} [opts.retried=false] - Internal: already retried after an expired token.
+         * @returns {Promise<any>} Parsed JSON.
+         * @throws {ServerError} On any failure.
+         */
+        async request(method, path, { body, auth = true, retried = false } = {}) {
+            const { serverUrl } = SettingsStore.get();
+            if (!serverUrl) throw new ServerError('not_configured', 'Faction sharing is not set up. Open Settings from the Tampermonkey menu.');
+            const headers = { Accept: 'application/json' };
+            if (body !== undefined) headers['Content-Type'] = 'application/json';
+            if (auth) headers.Authorization = `Bearer ${(await Session.ensure()).token}`;
+            await this._limiter.acquire();
+            const res = await gmRequest({ method, url: serverUrl + path, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+
+            let data = null;
+            try {
+                data = res.text ? JSON.parse(res.text) : null;
+            } catch (err) {
+                data = null;
+            }
+            if (res.status >= 200 && res.status < 300 && data) return data;
+
+            const e = data?.error ?? {};
+            const code = typeof e.code === 'string' ? e.code : `http_${res.status}`;
+            const message = typeof e.message === 'string' && e.message
+                ? e.message
+                : `Faction notes server error (HTTP ${res.status}). Check the server URL in Settings.`;
+            const err = new ServerError(code, message, {
+                status: res.status,
+                tornCode: Number.isInteger(e.tornCode) ? e.tornCode : undefined,
+                transient: res.status >= 500 || res.status === 429,
+            });
+            if (auth && !retried && res.status === 401 && code.startsWith('token_')) {
+                Session.clear(); // token expired or server secret changed: sign in again once
+                return this.request(method, path, { body, auth, retried: true });
+            }
+            if (code === 'not_editor') Session.setCanEdit(false);
+            throw err;
+        },
+    };
+
+    const Session = {
+        /** @type {Session|null} */
+        _mem: null,
+        /** @type {Promise<Session>|null} */
+        _inflight: null,
+        /**
+         * Last sign-in failure, so a bad key or non-member is not re-checked
+         * with Torn on every poll. Cleared when settings change.
+         * @type {{sig: string, err: ServerError, until: number}|null}
+         */
+        _failure: null,
+
+        /**
+         * Settings fingerprint (memory only, never logged).
+         * @param {Settings} s - Settings.
+         * @returns {string} Fingerprint.
+         */
+        _sig(s) {
+            return `${s.serverUrl}\n${s.apiKey}`;
+        },
+
+        /**
+         * Current session without signing in (may be stale or null).
+         * @returns {Session|null} Session.
+         */
+        peek() {
+            if (!this._mem) this._mem = Storage.readSafe(CONFIG.SESSION_KEY, null);
+            const s = this._mem;
+            return s && s.serverUrl === SettingsStore.get().serverUrl ? s : null;
+        },
+
+        /**
+         * Whether a session is usable right now.
+         * @param {Session|null} s - Session.
+         * @param {string} serverUrl - Configured server.
+         * @returns {boolean} True if valid.
+         */
+        _valid(s, serverUrl) {
+            return Boolean(s && typeof s.token === 'string' && s.serverUrl === serverUrl
+                && s.expiresAt - CONFIG.TOKEN_RENEW_MARGIN_MS > Date.now());
+        },
+
+        /**
+         * Return a valid session, signing in if needed (one sign-in at a time).
+         * @returns {Promise<Session>} Session.
+         * @throws {ServerError} If sign-in fails.
+         */
+        ensure() {
+            const settings = SettingsStore.get();
+            const stored = Storage.readSafe(CONFIG.SESSION_KEY, null); // another tab may have signed in
+            if (this._valid(stored, settings.serverUrl)) {
+                this._mem = stored;
+                return Promise.resolve(stored);
+            }
+            const f = this._failure;
+            if (f && f.sig === this._sig(settings) && Date.now() < f.until) return Promise.reject(f.err);
+            if (!this._inflight) {
+                this._inflight = this._signIn(settings).finally(() => {
+                    this._inflight = null;
+                });
+            }
+            return this._inflight;
+        },
+
+        /**
+         * POST /auth with the stored key.
+         * @param {Settings} settings - Current settings.
+         * @returns {Promise<Session>} New session.
+         * @throws {ServerError} With a readable message.
+         */
+        async _signIn(settings) {
+            if (!settings.apiKey) {
+                throw new ServerError('no_key', 'Add your Public API key in Settings to see faction notes.', { needsKey: true });
+            }
+            let data;
+            try {
+                data = await Server.request('POST', '/auth', { body: { key: settings.apiKey }, auth: false });
+            } catch (err) {
+                const mapped = this._mapAuthError(err);
+                this._failure = {
+                    sig: this._sig(settings),
+                    err: mapped,
+                    until: mapped.transient ? Date.now() + CONFIG.BACKOFF_MS : Infinity,
+                };
+                throw mapped;
+            }
+            if (!data || typeof data.token !== 'string' || !Number.isFinite(data.expiresAt)) {
+                throw new ServerError('bad_response', 'Unexpected sign-in response from the notes server.');
+            }
+            /** @type {Session} */
+            const session = {
+                token: data.token,
+                expiresAt: data.expiresAt,
+                player: { id: Number(data.player?.id) || 0, name: String(data.player?.name ?? '') },
+                faction: { id: Number(data.faction?.id) || 0, name: String(data.faction?.name ?? '') },
+                canEdit: data.canEdit === true,
+                serverUrl: settings.serverUrl,
+            };
+            this._failure = null;
+            this._mem = session;
+            Storage.write(CONFIG.SESSION_KEY, session);
+            log('Signed in as', session.player.name, session.canEdit ? '(editor)' : '(viewer)');
+            return session;
+        },
+
+        /**
+         * Turn a sign-in failure into a user-facing error.
+         * @param {unknown} err - Raw error.
+         * @returns {ServerError} Mapped error.
+         */
+        _mapAuthError(err) {
+            if (!(err instanceof ServerError)) return new ServerError('unknown', String(err), { transient: true });
+            if (err.code === 'torn_error') {
+                const code = err.tornCode ?? 0;
+                return new ServerError('torn_error', Data.tornErrorMessage(code), {
+                    status: err.status,
+                    tornCode: code,
+                    needsKey: code === 1 || code === 2 || code === 16,
+                    transient: TORN_TRANSIENT.has(code),
+                });
+            }
+            if (err.code === 'bad_key_format') return new ServerError(err.code, err.message, { needsKey: true });
+            if (err.code === 'torn_unreachable') return new ServerError(err.code, err.message, { transient: true });
+            return err;
+        },
+
+        /**
+         * Update the editor flag (the server re-checks it on every request).
+         * @param {boolean} canEdit - New value.
+         * @returns {void}
+         */
+        setCanEdit(canEdit) {
+            const s = this.peek();
+            if (!s || s.canEdit === canEdit) return;
+            s.canEdit = canEdit;
+            Storage.write(CONFIG.SESSION_KEY, s);
+        },
+
+        /**
+         * Forget the session and any remembered sign-in failure.
+         * @returns {void}
+         */
+        clear() {
+            this._mem = null;
+            this._failure = null;
+            Storage.write(CONFIG.SESSION_KEY, null);
+        },
+    };
+
+    /** Small facade used by the UI. */
+    const Shared = {
+        _lastError: '',
+
+        /**
+         * Whether faction sharing is configured (server URL set).
+         * @returns {boolean} True if on.
+         */
+        isConfigured() {
+            return Boolean(SettingsStore.get().serverUrl);
+        },
+
+        /**
+         * Whether the signed-in member may edit faction notes.
+         * @returns {boolean} True for editors.
+         */
+        canEdit() {
+            return Session.peek()?.canEdit === true;
+        },
+
+        /**
+         * Refresh faction notes and re-render buttons. Errors are reported
+         * (once per distinct message when quiet) and never thrown.
+         * @param {{quiet?: boolean}} [opts] - quiet: used by background polling.
+         * @returns {Promise<boolean>} True on success.
+         */
+        async refreshAndRender({ quiet = false } = {}) {
+            if (!this.isConfigured() || !SettingsStore.get().apiKey) return false;
+            try {
+                await SharedStore.refresh();
+                this._lastError = '';
+                refreshAll();
+                return true;
+            } catch (err) {
+                handleSharedError('Faction notes', err, { quiet });
+                refreshAll(); // canEdit may have changed
+                return false;
+            }
+        },
+    };
 
     /* =========================================================================
      * UI
@@ -628,6 +1496,9 @@
 .${CLS.factionHostNote}{padding-right:${CONFIG.FACTION_PAD_NOTE_PX}px !important;}
 .${CLS.kindFaction}{position:absolute;right:2px;top:50%;transform:translateY(-50%);
   max-width:${CONFIG.FACTION_PILL_MAX_PX}px;}
+.${CLS.kindShared}{margin-left:4px;max-width:${CONFIG.ITEMS_PILL_MAX_PX}px;box-shadow:inset 0 0 0 1px rgba(255,255,255,.55);cursor:help;}
+.${CLS.btnReadOnly}{cursor:help;}
+.${CLS.btnHidden}{display:none !important;}
 ${colorRules}
 .${CLS.tip}{position:absolute;z-index:${z + 1};max-width:${CONFIG.TOOLTIP_MAX_PX}px;padding:6px 8px;
   pointer-events:none;${panel}}
@@ -663,6 +1534,14 @@ ${colorRules}
 .${CLS.modal} h3{margin:0 0 8px;font-size:14px;}
 .${CLS.modalBody}{margin-bottom:10px;white-space:pre-wrap;}
 .${CLS.modal} input[type="file"]{display:block;margin:8px 0;color:#e6e6e6;max-width:100%;}
+.${CLS.modal} input[type="text"],.${CLS.modal} input[type="password"]{width:100%;box-sizing:border-box;background:#14171b;
+  color:#e6e6e6;border:1px solid #3a3f47;border-radius:4px;padding:4px 6px;font:12px Arial,Helvetica,sans-serif;}
+.${CLS.popMeta}{color:#9aa0a6;font-size:11px;margin:-4px 0 8px;}
+.${CLS.status}{margin:4px 0 10px;color:#c9d1d9;white-space:pre-wrap;}
+.${CLS.checklist}{max-height:240px;overflow:auto;border:1px solid #3a3f47;border-radius:4px;padding:4px;margin:6px 0 10px;}
+.${CLS.checkRow}{display:flex;gap:6px;align-items:flex-start;padding:2px 0;cursor:pointer;}
+.${CLS.checkRow} input{margin:2px 0 0;flex:0 0 auto;}
+.${CLS.linkRow}{display:flex;gap:6px;}
 .${CLS.notices}{position:fixed;right:16px;bottom:16px;z-index:${z + 3};display:flex;flex-direction:column;gap:6px;}
 .${CLS.notice}{padding:8px 10px;max-width:320px;${panel}}
 .${CLS.noticeError}{border-color:#d9534f;}
@@ -702,6 +1581,23 @@ ${colorRules}
         path.setAttribute('fill', 'currentColor');
         path.setAttribute('fill-rule', 'evenodd');
         path.setAttribute('d', 'M1 1h6.6L15 8.4 8.4 15 1 7.6V1zm3.5 2a1.5 1.5 0 100 3 1.5 1.5 0 000-3z');
+        svg.append(path);
+        return svg;
+    }
+
+    /**
+     * Build the small "faction" (two people) SVG icon used on shared pills.
+     * @returns {SVGElement} Icon element.
+     */
+    function createSharedIcon() {
+        const ns = 'http://www.w3.org/2000/svg';
+        const svg = document.createElementNS(ns, 'svg');
+        svg.setAttribute('viewBox', '0 0 16 16');
+        svg.setAttribute('aria-hidden', 'true');
+        svg.setAttribute('class', CLS.icon);
+        const path = document.createElementNS(ns, 'path');
+        path.setAttribute('fill', 'currentColor');
+        path.setAttribute('d', 'M5.5 2a2.5 2.5 0 110 5 2.5 2.5 0 010-5zm5.5 1a2 2 0 110 4 2 2 0 010-4zM0 14c0-2.8 2.2-5 5-5h1c2.8 0 5 2.2 5 5H0zm12 0c0-1.7-.6-3.2-1.6-4.4.2 0 .4-.1.6-.1h.5c2.5 0 4.5 2 4.5 4.5H12z');
         svg.append(path);
         return svg;
     }
@@ -765,6 +1661,71 @@ ${colorRules}
         }
     }
 
+    /**
+     * Report a faction-sharing error. Background (quiet) errors are shown once
+     * per distinct message so polling does not spam. A bad or missing key
+     * opens Settings once per page load.
+     * @param {string} context - What was being attempted.
+     * @param {unknown} err - The error.
+     * @param {{quiet?: boolean}} [opts] - Options.
+     * @returns {void}
+     */
+    function handleSharedError(context, err, { quiet = false } = {}) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (err instanceof ServerError && err.needsKey && !handleSharedError.promptedKey) {
+            handleSharedError.promptedKey = true;
+            openSettingsDialog(message);
+        }
+        if (quiet && message === Shared._lastError) {
+            log(`${context} (repeat): ${message}`);
+            return;
+        }
+        Shared._lastError = message;
+        reportError(context, err);
+    }
+    handleSharedError.promptedKey = false;
+
+    /* ---- Note sources ------------------------------------------------------ */
+
+    /** @type {{local: NoteSource, shared: NoteSource}} */
+    const Sources = {
+        local: {
+            kind: 'local',
+            get: (id) => NoteStore.get(id),
+            notes: () => NoteStore.snapshot().notes,
+            canEdit: () => true,
+            save: async (id, fields) => NoteStore.upsert(id, fields),
+            remove: async (id) => NoteStore.remove(id),
+        },
+        shared: {
+            kind: 'shared',
+            get: (id) => SharedStore.get(id),
+            notes: () => SharedStore.notes(),
+            canEdit: () => Shared.canEdit(),
+            save: (id, fields) => SharedStore.save(id, fields),
+            remove: (id) => SharedStore.remove(id),
+        },
+    };
+
+    /**
+     * Note source for a button.
+     * @param {HTMLElement} btn - Note button.
+     * @returns {NoteSource} Source.
+     */
+    function sourceOf(btn) {
+        return btn.dataset[DATA_SRC] === 'shared' ? Sources.shared : Sources.local;
+    }
+
+    /**
+     * Render signature: re-render only when the source, edit right or note changes.
+     * @param {'local'|'shared'} srcKind - Source kind.
+     * @param {Note|null} note - Note.
+     * @returns {string} Signature.
+     */
+    function buttonSig(srcKind, note) {
+        return `${srcKind}|${Sources[srcKind].canEdit() ? 'e' : 'r'}|${Data.noteSignature(note)}`;
+    }
+
     /* ---- Tooltip --------------------------------------------------------- */
     // A custom tooltip is used instead of the native `title` attribute because
     // Torn's own tooltip code renders some `title` attributes as HTML.
@@ -781,7 +1742,9 @@ ${colorRules}
         show(btn) {
             this.hide();
             const id = btn.dataset[DATA_ID];
-            const note = NoteStore.get(id);
+            const src = sourceOf(btn);
+            const note = src.get(id);
+            const editable = src.canEdit() && btn.dataset[DATA_KIND] !== 'shared';
             const tip = el('div', { cls: CLS.tip, attrs: { role: 'tooltip' } });
             if (note) {
                 if (note.label) {
@@ -791,10 +1754,21 @@ ${colorRules}
                     tip.append(title);
                 }
                 if (note.text) tip.append(el('div', { cls: CLS.tipBody, text: note.text }));
-                const when = note.updated ? new Date(note.updated).toLocaleString() : 'unknown date';
-                tip.append(el('div', { cls: CLS.tipMeta, text: `#${id} · updated ${when} · click to edit` }));
+                const action = editable ? 'click to edit' : 'read-only';
+                let meta;
+                if (src.kind === 'shared') {
+                    const who = note.updatedByName || (note.updatedById ? `#${note.updatedById}` : 'unknown');
+                    meta = `Faction note · edited by ${who} ${Data.relativeTime(note.updated, Date.now())} · ${action}`;
+                } else {
+                    const when = note.updated ? new Date(note.updated).toLocaleString() : 'unknown date';
+                    meta = `#${id} · updated ${when} · ${action}`;
+                }
+                tip.append(el('div', { cls: CLS.tipMeta, text: meta }));
             } else {
-                tip.append(el('div', { cls: CLS.tipBody, text: 'Click to add a label or note' }));
+                tip.append(el('div', {
+                    cls: CLS.tipBody,
+                    text: src.kind === 'shared' ? 'Click to add a faction note' : 'Click to add a label or note',
+                }));
             }
             document.body.append(tip);
             placeNear(tip, btn);
@@ -825,21 +1799,36 @@ ${colorRules}
          * @param {string} opts.title - Heading text.
          * @param {string} [opts.message] - Body text.
          * @param {Node[]} [opts.content] - Extra nodes under the message.
-         * @param {{label: string, variant?: 'primary'|'danger', disabled?: boolean, onClick: () => void}[]} opts.actions - Buttons.
+         * @param {{label: string, variant?: 'primary'|'danger', disabled?: boolean, onClick: () => (void|Promise<void>)}[]} opts.actions
+         *   Buttons. An async onClick disables all buttons until it settles.
          * @returns {HTMLButtonElement[]} The action buttons, in order.
          */
         open({ title, message = '', content = [], actions }) {
             this.close();
             Editor.close();
+            /** @type {HTMLButtonElement[]} */
             const buttons = actions.map((a) => {
                 const variant = a.variant === 'primary' ? CLS.uiPrimary : a.variant === 'danger' ? CLS.uiDanger : '';
                 const b = el('button', { cls: [CLS.uiBtn, variant], text: a.label, attrs: { type: 'button' } });
                 b.disabled = Boolean(a.disabled);
-                b.addEventListener('click', () => {
+                b.addEventListener('click', async () => {
+                    let result;
                     try {
-                        a.onClick();
+                        result = a.onClick();
                     } catch (err) {
                         reportError(a.label, err);
+                        return;
+                    }
+                    if (!(result instanceof Promise)) return;
+                    const before = buttons.map((x) => x.disabled);
+                    buttons.forEach((x) => { x.disabled = true; });
+                    try {
+                        await result;
+                    } catch (err) {
+                        reportError(a.label, err);
+                    } finally {
+                        // Restore only if the dialog is still the same one.
+                        if (b.isConnected) buttons.forEach((x, i) => { x.disabled = before[i]; });
                     }
                 });
                 return b;
@@ -890,6 +1879,8 @@ ${colorRules}
         btn.addEventListener('click', (e) => {
             e.preventDefault();
             e.stopPropagation();
+            // Read-only: faction pills on the Items page, or a viewer in the armory.
+            if (btn.dataset[DATA_KIND] === 'shared' || !sourceOf(btn).canEdit()) return;
             Tooltip.hide();
             try {
                 Editor.open(btn);
@@ -904,29 +1895,55 @@ ${colorRules}
         return btn;
     }
 
+    /** Class for each button kind. */
+    const KIND_CLASS = Object.freeze({
+        pill: CLS.kindPill,
+        badge: CLS.kindBadge,
+        faction: CLS.kindFaction,
+        shared: CLS.kindShared,
+    });
+
     /**
-     * Render a note button's contents and classes for its note (or lack of one).
-     * @param {HTMLButtonElement} btn - Button with data-tms-an-id set.
-     * @param {Note|null} note - Note to show.
+     * Render a note button from its source's current note.
+     * Hidden when there is nothing to show and the user cannot add a note
+     * (faction viewers, and the read-only faction pill on the Items page).
+     * @param {HTMLButtonElement} btn - Button with data-tms-an-id and -src set.
      * @returns {void}
      */
-    function renderNoteButton(btn, note) {
+    function renderNoteButton(btn) {
         const kind = btn.dataset[DATA_KIND];
-        const kindCls = kind === 'badge' ? CLS.kindBadge : kind === 'faction' ? CLS.kindFaction : CLS.kindPill;
+        const src = sourceOf(btn);
+        const note = src.get(btn.dataset[DATA_ID]);
+        const editable = src.canEdit() && kind !== 'shared';
+        const hidden = !note && !editable;
         const name = btn.dataset[DATA_NAME] || 'item';
-        btn.className = [CLS.btn, kindCls, note ? CLS.btnNote : CLS.btnEmpty, note ? CLS.color(note.color) : ''].join(' ').trim();
+
+        btn.className = [
+            CLS.btn,
+            KIND_CLASS[kind] ?? CLS.kindPill,
+            note ? CLS.btnNote : CLS.btnEmpty,
+            note ? CLS.color(note.color) : '',
+            editable ? '' : CLS.btnReadOnly,
+            hidden ? CLS.btnHidden : '',
+        ].filter(Boolean).join(' ');
+
         btn.replaceChildren();
-        if (note?.label) {
-            btn.append(el('span', { cls: CLS.label, text: note.label }));
-        } else {
-            btn.append(createTagIcon());
-        }
-        const aria = note
-            ? `Note for ${name}: ${note.label || 'unlabelled'}. Click to edit.`
-            : `Add note to ${name}`;
+        if (kind === 'shared') btn.append(createSharedIcon());
+        if (note?.label) btn.append(el('span', { cls: CLS.label, text: note.label }));
+        else if (kind !== 'shared') btn.append(createTagIcon());
+
+        const what = src.kind === 'shared' ? 'Faction note' : 'Note';
+        let aria = `Add ${what.toLowerCase()} to ${name}`;
+        if (note) aria = `${what} for ${name}: ${note.label || 'unlabelled'}.${editable ? ' Click to edit.' : ''}`;
         btn.setAttribute('aria-label', aria);
-        btn.dataset[DATA_SIG] = Data.noteSignature(note);
-        if (kind === 'faction') btn.parentElement?.classList.toggle(CLS.factionHostNote, Boolean(note));
+        if (hidden) btn.setAttribute('tabindex', '-1');
+        else btn.removeAttribute('tabindex');
+        btn.dataset[DATA_SIG] = buttonSig(src.kind, note);
+
+        if (kind === 'faction' && btn.parentElement) {
+            btn.parentElement.classList.toggle(CLS.factionHost, !hidden);
+            btn.parentElement.classList.toggle(CLS.factionHostNote, Boolean(note));
+        }
     }
 
     /**
@@ -936,16 +1953,15 @@ ${colorRules}
      */
     function refreshId(id) {
         if (!Data.isValidArmoryId(id)) return;
-        const note = NoteStore.get(id);
-        document.querySelectorAll(`.${CLS.btn}[data-tms-an-id="${id}"]`).forEach((btn) => renderNoteButton(btn, note));
+        document.querySelectorAll(`.${CLS.btn}[data-tms-an-id="${id}"]`).forEach((btn) => renderNoteButton(btn));
     }
 
     /**
-     * Re-render every mounted button (e.g. after import or clear).
+     * Re-render every mounted button (e.g. after import, clear or a refresh).
      * @returns {void}
      */
     function refreshAll() {
-        document.querySelectorAll(`.${CLS.btn}`).forEach((btn) => renderNoteButton(btn, NoteStore.get(btn.dataset[DATA_ID])));
+        document.querySelectorAll(`.${CLS.btn}`).forEach((btn) => renderNoteButton(btn));
     }
 
     /* ---- Editor popover --------------------------------------------------- */
@@ -971,12 +1987,15 @@ ${colorRules}
             const id = btn.dataset[DATA_ID];
             const name = btn.dataset[DATA_NAME] || 'Item';
             const itemId = btn.dataset[DATA_ITEM] || '';
-            const existing = NoteStore.get(id);
+            const src = sourceOf(btn);
+            const shared = src.kind === 'shared';
+            const existing = src.get(id);
             let color = existing?.color ?? CONFIG.DEFAULT_COLOR;
+            let busy = false;
 
             const listId = `${PREFIX}-labels`;
             const datalist = el('datalist', { attrs: { id: listId } });
-            for (const label of Data.collectLabels(NoteStore.snapshot().notes)) {
+            for (const label of Data.collectLabels(src.notes())) {
                 const opt = document.createElement('option');
                 opt.value = label;
                 datalist.append(opt);
@@ -1013,50 +2032,77 @@ ${colorRules}
                 return s;
             });
 
-            const save = () => {
-                try {
-                    const label = labelInput.value.trim();
-                    const text = textArea.value.trimEnd();
-                    if (!label && !text.trim()) {
-                        if (existing) NoteStore.remove(id);
-                    } else {
-                        NoteStore.upsert(id, { label, color, text, itemName: name, itemId });
-                    }
-                    this.close();
-                    refreshId(id);
-                } catch (err) {
-                    reportError('Could not save note', err);
-                }
-            };
-            const remove = () => {
-                try {
-                    NoteStore.remove(id);
-                    this.close();
-                    refreshId(id);
-                } catch (err) {
-                    reportError('Could not delete note', err);
-                }
-            };
-
             const mkBtn = (text, variant, handler) => {
                 const b = el('button', { cls: [CLS.uiBtn, variant], text, attrs: { type: 'button' } });
                 b.addEventListener('click', handler);
                 return b;
             };
+            const deleteBtn = existing ? mkBtn('Delete', CLS.uiDanger, () => remove()) : null;
+            const cancelBtn = mkBtn('Cancel', '', () => this.close());
+            const saveBtn = mkBtn('Save', CLS.uiPrimary, () => save());
 
-            const pop = el('div', { cls: CLS.pop, attrs: { role: 'dialog', 'aria-label': `Note for ${name}` } }, [
+            /**
+             * Disable the form while a (possibly remote) save runs.
+             * @param {boolean} on - Busy state.
+             * @param {string} [label] - Save button text while busy.
+             * @returns {void}
+             */
+            const setBusy = (on, label = 'Saving…') => {
+                busy = on;
+                [deleteBtn, cancelBtn, saveBtn, labelInput, textArea, ...swatches].forEach((x) => {
+                    if (x) x.disabled = on;
+                });
+                saveBtn.textContent = on ? label : 'Save';
+            };
+
+            /**
+             * Run a save/delete, then close and refresh; on failure keep the form open.
+             * @param {() => Promise<void>} action - Work to do.
+             * @param {string} context - Error context.
+             * @param {string} busyLabel - Button text while running.
+             * @returns {Promise<void>}
+             */
+            const run = async (action, context, busyLabel) => {
+                if (busy) return;
+                setBusy(true, busyLabel);
+                try {
+                    await action();
+                    if (this._node === pop) this.close();
+                    refreshId(id);
+                } catch (err) {
+                    if (this._node === pop) setBusy(false);
+                    if (shared) handleSharedError(context, err);
+                    else reportError(context, err);
+                    refreshId(id); // e.g. editor rights were revoked
+                }
+            };
+
+            const save = () => run(async () => {
+                const label = labelInput.value.trim();
+                const text = textArea.value.trimEnd();
+                if (!label && !text.trim()) {
+                    if (existing) await src.remove(id);
+                } else {
+                    await src.save(id, { label, color, text, itemName: name, itemId });
+                }
+            }, 'Could not save note', 'Saving…');
+            const remove = () => run(() => src.remove(id), 'Could not delete note', 'Deleting…');
+
+            let meta = null;
+            if (shared && existing) {
+                const who = existing.updatedByName || (existing.updatedById ? `#${existing.updatedById}` : 'unknown');
+                meta = el('div', { cls: CLS.popMeta, text: `Last edited by ${who}, ${Data.relativeTime(existing.updated, Date.now())}` });
+            }
+
+            const pop = el('div', { cls: CLS.pop, attrs: { role: 'dialog', 'aria-label': `${shared ? 'Faction note' : 'Note'} for ${name}` } }, [
                 el('div', { cls: CLS.popHead, text: name }),
-                el('div', { cls: CLS.popSub, text: `Armory ID #${id}` }),
+                el('div', { cls: CLS.popSub, text: shared ? `Faction note · Armory ID #${id}` : `Armory ID #${id}` }),
+                meta,
                 el('label', { cls: CLS.field }, [el('span', { text: `Label (max ${CONFIG.LABEL_MAX})` }), labelInput]),
                 datalist,
                 swatchWrap,
                 el('label', { cls: CLS.field }, [el('span', { text: 'Note' }), textArea, counter]),
-                el('div', { cls: CLS.actions }, [
-                    existing ? mkBtn('Delete', CLS.uiDanger, remove) : null,
-                    el('span', { cls: CLS.spacer }),
-                    mkBtn('Cancel', '', () => this.close()),
-                    mkBtn('Save', CLS.uiPrimary, save),
-                ]),
+                el('div', { cls: CLS.actions }, [deleteBtn, el('span', { cls: CLS.spacer }), cancelBtn, saveBtn]),
             ]);
 
             // Stop popover clicks from reaching Torn's row/document handlers.
@@ -1229,6 +2275,243 @@ ${colorRules}
         });
     }
 
+    /* ---- Faction sharing dialogs -------------------------------------------- */
+
+    /**
+     * Describe the current sign-in state.
+     * @returns {string} Status text.
+     */
+    function sessionStatusText() {
+        if (!Shared.isConfigured()) return 'Faction sharing is off (no server URL). The Faction Armory uses local notes.';
+        if (!SettingsStore.get().apiKey) return 'Not signed in: add your Public API key.';
+        const s = Session.peek();
+        if (!s) return 'Not signed in yet.';
+        const role = s.canEdit ? 'editor (can change faction notes)' : 'viewer (read-only)';
+        const faction = s.faction.name ? ` · ${s.faction.name}` : '';
+        return `Signed in as ${s.player.name} [${s.player.id}]${faction}\nRole: ${role}`;
+    }
+
+    /**
+     * Open the Settings dialog (server URL + Public API key).
+     * @param {string} [reason] - Optional message shown at the top (e.g. why it opened).
+     * @returns {void}
+     */
+    function openSettingsDialog(reason = '') {
+        const current = SettingsStore.get();
+        const urlInput = el('input', { attrs: { type: 'text', placeholder: 'https://torn-armory-notes.example.workers.dev', spellcheck: 'false', autocomplete: 'off' } });
+        urlInput.value = current.serverUrl;
+        const keyInput = el('input', { attrs: { type: 'password', maxlength: '16', placeholder: '16-character Public key', autocomplete: 'off', spellcheck: 'false' } });
+        keyInput.value = current.apiKey;
+        const status = el('div', { cls: CLS.status, text: sessionStatusText() });
+
+        /**
+         * Validate and store the form, then sign in.
+         * @returns {Promise<void>}
+         */
+        const saveAndSignIn = async () => {
+            let serverUrl;
+            try {
+                serverUrl = Data.normalizeServerUrl(urlInput.value);
+            } catch (err) {
+                status.textContent = err.message;
+                return;
+            }
+            const apiKey = keyInput.value.trim();
+            if (apiKey && !Data.isApiKeyFormat(apiKey)) {
+                status.textContent = 'An API key is 16 letters and numbers. Create a Public key in Torn: Settings > API Keys.';
+                return;
+            }
+            const before = SettingsStore.get();
+            SettingsStore.set({ serverUrl, apiKey });
+            if (before.serverUrl !== serverUrl || before.apiKey !== apiKey) {
+                Session.clear();
+                if (before.serverUrl !== serverUrl) SharedStore.clear();
+                SharedStore.load();
+                handleSharedError.promptedKey = false;
+            }
+            onSharingChanged();
+            if (!serverUrl || !apiKey) {
+                status.textContent = sessionStatusText();
+                Notice.show(serverUrl ? 'Saved. Add your API key to see faction notes.' : 'Saved. Faction sharing is off.');
+                return;
+            }
+            status.textContent = 'Signing in…';
+            try {
+                await Session.ensure();
+                await SharedStore.refresh();
+                Shared._lastError = '';
+                refreshAll();
+                status.textContent = sessionStatusText();
+                Modal.close();
+                Notice.show(`Signed in. ${Object.keys(SharedStore.notes()).length} faction notes loaded.`);
+            } catch (err) {
+                refreshAll();
+                status.textContent = `Sign-in failed: ${err instanceof Error ? err.message : String(err)}`;
+            }
+        };
+
+        Modal.open({
+            title: 'Armory Notes settings',
+            message: (reason ? `${reason}\n\n` : '')
+                + 'Faction notes need your faction\'s notes server and a Torn API key with Public access. '
+                + 'The key is stored only in this browser and sent only to that server when you sign in.',
+            content: [
+                el('label', { cls: CLS.field }, [el('span', { text: 'Faction notes server URL' }), urlInput]),
+                el('label', { cls: CLS.field }, [el('span', { text: 'Torn API key (Public access)' }), keyInput]),
+                status,
+            ],
+            actions: [
+                {
+                    label: 'Sign out',
+                    onClick: () => {
+                        SettingsStore.set({ serverUrl: SettingsStore.get().serverUrl, apiKey: '' });
+                        keyInput.value = '';
+                        Session.clear();
+                        SharedStore.clear();
+                        onSharingChanged();
+                        status.textContent = sessionStatusText();
+                        Notice.show('Signed out. Your key was removed from this browser.');
+                    },
+                },
+                { label: 'Cancel', onClick: () => Modal.close() },
+                { label: 'Save & sign in', variant: 'primary', onClick: saveAndSignIn },
+            ],
+        });
+        (current.serverUrl ? keyInput : urlInput).focus();
+    }
+
+    /**
+     * Open the "upload local notes to the faction" dialog (editors only).
+     * Uploaded notes are moved: removed locally once the server accepts them.
+     * @returns {Promise<void>}
+     */
+    async function openUploadDialog() {
+        if (!Shared.isConfigured() || !SettingsStore.get().apiKey) {
+            openSettingsDialog('Set up faction sharing before uploading notes.');
+            return;
+        }
+        if (NoteStore.isReadOnly()) {
+            reportError('Upload', new Error('Local notes could not be read. Fix them first (Import or Clear).'));
+            return;
+        }
+        const local = NoteStore.snapshot().notes;
+        const ids = Object.keys(local);
+        if (!ids.length) {
+            Notice.show('You have no local notes to upload.');
+            return;
+        }
+        let session;
+        try {
+            session = await Session.ensure();
+            await SharedStore.refresh();
+        } catch (err) {
+            handleSharedError('Upload', err);
+            return;
+        }
+        if (!session.canEdit && !Shared.canEdit()) {
+            Modal.open({
+                title: 'Upload local notes',
+                message: 'Only faction note editors can upload notes. Ask your faction\'s notes admin to add your player ID.',
+                actions: [{ label: 'OK', variant: 'primary', onClick: () => Modal.close() }],
+            });
+            return;
+        }
+
+        // Seen in the faction armory first, then by item name.
+        ids.sort((a, b) => (Number(SeenIds.has(b)) - Number(SeenIds.has(a)))
+            || (local[a].itemName || '').localeCompare(local[b].itemName || ''));
+
+        /** @type {Map<string, HTMLInputElement>} */
+        const boxes = new Map();
+        const list = el('div', { cls: CLS.checklist });
+        for (const id of ids) {
+            const note = local[id];
+            const already = Boolean(SharedStore.get(id));
+            const box = /** @type {HTMLInputElement} */ (el('input', { attrs: { type: 'checkbox' } }));
+            box.checked = SeenIds.has(id) && !already;
+            box.disabled = already;
+            boxes.set(id, box);
+            const text = `${note.label || '(no label)'} · ${note.itemName || 'Item'} #${id}`
+                + (already ? ' · already has a faction note' : SeenIds.has(id) ? ' · seen in faction armory' : '');
+            list.append(el('label', { cls: CLS.checkRow }, [box, el('span', { text })]));
+        }
+        const counter = el('div', { cls: CLS.status });
+        const updateCounter = () => {
+            const n = [...boxes.values()].filter((b) => b.checked).length;
+            counter.textContent = `${n} selected`;
+            if (uploadBtn) uploadBtn.disabled = n === 0;
+        };
+        list.addEventListener('change', updateCounter);
+        const setAll = (on) => {
+            boxes.forEach((b) => { if (!b.disabled) b.checked = on; });
+            updateCounter();
+        };
+        const mkLink = (text, fn) => {
+            const b = el('button', { cls: CLS.uiBtn, text, attrs: { type: 'button' } });
+            b.addEventListener('click', fn);
+            return b;
+        };
+
+        let uploadBtn = null;
+        const buttons = Modal.open({
+            title: 'Upload local notes to faction',
+            message: 'Ticked notes become faction notes that every member can see, and are then removed from this browser\'s '
+                + 'local notes. Items that already have a faction note are skipped. Items seen in the faction armory are ticked for you.',
+            content: [
+                el('div', { cls: CLS.linkRow }, [mkLink('Select all', () => setAll(true)), mkLink('Select none', () => setAll(false))]),
+                list,
+                counter,
+            ],
+            actions: [
+                { label: 'Cancel', onClick: () => Modal.close() },
+                {
+                    label: 'Upload',
+                    variant: 'primary',
+                    onClick: async () => {
+                        const chosen = [...boxes].filter(([, b]) => b.checked && !b.disabled).map(([id]) => ({ armoryId: id, ...local[id] }));
+                        if (!chosen.length) return;
+                        counter.textContent = `Uploading ${chosen.length}…`;
+                        let result;
+                        try {
+                            result = await SharedStore.importNotes(chosen);
+                        } catch (err) {
+                            counter.textContent = 'Upload failed. Nothing was removed locally.';
+                            handleSharedError('Upload', err);
+                            await Shared.refreshAndRender({ quiet: true });
+                            return;
+                        }
+                        try {
+                            NoteStore.removeMany(result.added);
+                        } catch (err) {
+                            reportError('Uploaded, but could not remove the local copies', err);
+                        }
+                        await Shared.refreshAndRender({ quiet: true });
+                        Modal.close();
+                        refreshAll();
+                        const parts = [`Uploaded ${result.added.length} note${result.added.length === 1 ? '' : 's'} (moved out of local notes).`];
+                        if (result.skipped.length) parts.push(`${result.skipped.length} already had a faction note and stayed local.`);
+                        if (result.invalid.length) parts.push(`${result.invalid.length} were invalid and stayed local.`);
+                        Notice.show(parts.join(' '));
+                    },
+                },
+            ],
+        });
+        uploadBtn = buttons[1];
+        updateCounter();
+        log('Upload dialog for', session.player.name);
+    }
+
+    /**
+     * Called after sharing settings change: re-decorate rows and start/stop polling.
+     * @returns {void}
+     */
+    function onSharingChanged() {
+        Watchers.forEach((w) => w.scan());
+        refreshAll();
+        if (PageState.factionArmoryOpen) SharedSync.start();
+        if (!Shared.isConfigured()) SharedSync.stop();
+    }
+
     /* ---- Page adapters (DOM reading) -------------------------------------- */
 
     /**
@@ -1256,6 +2539,7 @@ ${colorRules}
         mounts: [
             {
                 kind: 'pill',
+                source: () => 'local',
                 findHost: (row) => row.querySelector(CONFIG.SEL.ITEMS_NAME_WRAP),
                 attach: (host, btn) => {
                     const nameEl = host.querySelector(`:scope > ${CONFIG.SEL.ITEMS_NAME}`);
@@ -1264,7 +2548,20 @@ ${colorRules}
                 },
             },
             {
+                // Read-only faction note, shown only when one exists.
+                kind: 'shared',
+                source: () => 'shared',
+                findHost: (row) => row.querySelector(CONFIG.SEL.ITEMS_NAME_WRAP),
+                attach: (host, btn) => {
+                    const after = host.querySelector(`:scope > .${CLS.btn}[data-tms-an-kind="pill"]`)
+                        ?? host.querySelector(`:scope > ${CONFIG.SEL.ITEMS_NAME}`);
+                    if (after) after.after(btn);
+                    else host.append(btn);
+                },
+            },
+            {
                 kind: 'badge',
+                source: () => 'local',
                 findHost: (row) => row.querySelector(CONFIG.SEL.ITEMS_THUMB),
                 attach: (host, btn) => {
                     host.classList.add(CLS.thumbHost);
@@ -1285,6 +2582,8 @@ ${colorRules}
         mounts: [
             {
                 kind: 'faction',
+                // Faction notes when sharing is set up; otherwise local notes (v1 behavior).
+                source: () => (Shared.isConfigured() ? 'shared' : 'local'),
                 findHost: (row) => row.querySelector(CONFIG.SEL.FACTION_NAME),
                 attach: (host, btn) => {
                     host.classList.add(CLS.factionHost);
@@ -1305,22 +2604,24 @@ ${colorRules}
         const id = adapter.getId(row);
         if (!Data.isValidArmoryId(id)) return;
         if (!TRACKED.has(adapter.getCategory(row))) return;
-        const note = NoteStore.get(id);
-        const sig = Data.noteSignature(note);
+        if (adapter === FACTION_ADAPTER) SeenIds.add(id);
 
         for (const spec of adapter.mounts) {
             const host = spec.findHost(row);
             if (!host) continue;
-            let btn = host.querySelector(`:scope > .${CLS.btn}`);
+            const srcKind = spec.source();
+            const sig = buttonSig(srcKind, Sources[srcKind].get(id));
+            let btn = host.querySelector(`:scope > .${CLS.btn}[data-tms-an-kind="${spec.kind}"]`);
             if (btn && btn.dataset[DATA_ID] === id && btn.dataset[DATA_SIG] === sig) continue;
             if (!btn) {
                 btn = createNoteButton(spec.kind);
                 spec.attach(host, btn);
             }
             btn.dataset[DATA_ID] = id;
+            btn.dataset[DATA_SRC] = srcKind;
             btn.dataset[DATA_NAME] = adapter.getName(row);
             btn.dataset[DATA_ITEM] = adapter.getItemId(row);
-            renderNoteButton(btn, note);
+            renderNoteButton(btn);
         }
     }
 
@@ -1381,6 +2682,15 @@ ${colorRules}
         return nodes.length > 0 && nodes.every((n) => n.nodeType === Node.ELEMENT_NODE && n.classList.contains(CLS.btn));
     }
 
+    /** Watchers currently attached (rescanned when sharing settings change). @type {Set<RootWatcher>} */
+    const Watchers = new Set();
+
+    /** Page-level state shared between observers and dialogs. */
+    const PageState = {
+        /** True while the Faction Armory tab is open and watched. */
+        factionArmoryOpen: false,
+    };
+
     /** Watches one container and decorates rows as Torn (re)renders them. */
     class RootWatcher {
         /**
@@ -1421,6 +2731,7 @@ ${colorRules}
                 });
                 this.parentObserver.observe(root.parentNode, { childList: true });
             }
+            Watchers.add(this);
             log(`Watching ${this.adapter.name} root`);
             this.scan();
         }
@@ -1434,6 +2745,7 @@ ${colorRules}
             this.parentObserver?.disconnect();
             this.observer = null;
             this.parentObserver = null;
+            Watchers.delete(this);
             if (this.root) log(`Stopped watching ${this.adapter.name} root`);
             this.root = null;
         }
@@ -1453,7 +2765,61 @@ ${colorRules}
     }
 
     /**
-     * Items page: watch the item category container.
+     * Polls the notes server for faction-note changes while the Faction Armory
+     * is open. Paused while the tab is hidden; catches up when it is shown.
+     */
+    const SharedSync = {
+        _active: false,
+        _timer: 0,
+        /** @type {(() => void)|null} */
+        _onVisibility: null,
+
+        /**
+         * Start polling (no-op if already running or sharing is off).
+         * @returns {void}
+         */
+        start() {
+            if (this._active || !Shared.isConfigured()) return;
+            this._active = true;
+            this._onVisibility = () => {
+                if (!document.hidden && this._active && Date.now() - SharedStore.fetchedAt() >= CONFIG.SHARED_POLL_MS) this._tick();
+            };
+            document.addEventListener('visibilitychange', this._onVisibility);
+            log('Faction note polling started');
+            this._tick();
+        },
+
+        /**
+         * Stop polling.
+         * @returns {void}
+         */
+        stop() {
+            if (!this._active) return;
+            this._active = false;
+            clearTimeout(this._timer);
+            if (this._onVisibility) document.removeEventListener('visibilitychange', this._onVisibility);
+            this._onVisibility = null;
+            log('Faction note polling stopped');
+        },
+
+        /**
+         * Refresh now (if visible) and schedule the next refresh.
+         * @returns {Promise<void>}
+         */
+        async _tick() {
+            clearTimeout(this._timer);
+            if (!this._active) return;
+            if (!document.hidden) await Shared.refreshAndRender({ quiet: true });
+            if (this._active) {
+                clearTimeout(this._timer);
+                this._timer = setTimeout(() => this._tick(), CONFIG.SHARED_POLL_MS);
+            }
+        },
+    };
+
+    /**
+     * Items page: watch the item category container. Faction notes are shown
+     * read-only from the cache, refreshed once if it is old.
      * @returns {Promise<void>}
      */
     async function startItemsPage() {
@@ -1463,6 +2829,21 @@ ${colorRules}
             return;
         }
         new RootWatcher(ITEMS_ADAPTER).attach(root);
+        if (Shared.isConfigured() && Date.now() - SharedStore.fetchedAt() > CONFIG.ITEMS_SHARED_MAX_AGE_MS) {
+            await Shared.refreshAndRender({ quiet: true });
+        }
+    }
+
+    /**
+     * First Faction Armory visit with a server configured but no key: open
+     * Settings once so the member can sign in.
+     * @returns {void}
+     */
+    function maybePromptSetup() {
+        if (!Shared.isConfigured() || SettingsStore.get().apiKey) return;
+        if (Storage.readSafe(CONFIG.SETUP_PROMPTED_KEY, false)) return;
+        Storage.write(CONFIG.SETUP_PROMPTED_KEY, true);
+        openSettingsDialog('Welcome! Your faction shares armory notes. Add a Public API key to see them.');
     }
 
     /**
@@ -1475,6 +2856,8 @@ ${colorRules}
             const token = ++syncToken;
             if (!location.hash.includes(CONFIG.FACTION_HASH_TOKEN)) {
                 watcher.detach();
+                PageState.factionArmoryOpen = false;
+                SharedSync.stop();
                 return;
             }
             const root = await waitForElement(CONFIG.SEL.FACTION_ROOT, CONFIG.WAIT_FOR_TIMEOUT_MS);
@@ -1485,6 +2868,9 @@ ${colorRules}
                 return;
             }
             watcher.attach(root);
+            PageState.factionArmoryOpen = true;
+            SharedSync.start();
+            maybePromptSetup();
         };
         const watcher = new RootWatcher(FACTION_ADAPTER, () => sync());
         window.addEventListener('hashchange', () => {
@@ -1511,9 +2897,29 @@ ${colorRules}
                 reportError(label, err);
             }
         };
-        GM_registerMenuCommand('Export notes (backup)', guard('Export', openExportDialog));
-        GM_registerMenuCommand('Import notes (restore)', guard('Import', openImportDialog));
-        GM_registerMenuCommand('Clear all notes', guard('Clear', openClearDialog));
+        GM_registerMenuCommand('Settings (faction sharing)', guard('Settings', () => openSettingsDialog()));
+        GM_registerMenuCommand('Refresh faction notes', guard('Refresh', () => {
+            if (!Shared.isConfigured() || !SettingsStore.get().apiKey) {
+                openSettingsDialog('Set up faction sharing first.');
+                return;
+            }
+            Shared.refreshAndRender().then((ok) => {
+                if (ok) Notice.show(`Faction notes refreshed (${Object.keys(SharedStore.notes()).length}).`);
+            });
+        }));
+        GM_registerMenuCommand('Upload local notes to faction', guard('Upload', () => {
+            openUploadDialog().catch((err) => reportError('Upload', err));
+        }));
+        GM_registerMenuCommand('Clear faction notes cache', guard('Clear cache', () => {
+            SharedStore.clear();
+            Session.clear();
+            refreshAll();
+            Notice.show('Faction notes cache cleared. Notes reload on the next refresh.');
+            if (PageState.factionArmoryOpen) Shared.refreshAndRender();
+        }));
+        GM_registerMenuCommand('Export local notes (backup)', guard('Export', openExportDialog));
+        GM_registerMenuCommand('Import local notes (restore)', guard('Import', openImportDialog));
+        GM_registerMenuCommand('Clear all local notes', guard('Clear', openClearDialog));
     }
 
     /**
@@ -1529,13 +2935,14 @@ ${colorRules}
             } catch (err) {
                 reportError('Saved notes could not be read; notes are read-only until fixed (Import a backup or Clear)', err);
             }
+            SharedStore.load();
             const path = location.pathname;
             if (path === CONFIG.PATHS.ITEMS) {
                 startItemsPage().catch((err) => reportError('Items page', err));
             } else if (path === CONFIG.PATHS.FACTIONS) {
                 startFactionPage();
             }
-            log('Initialized', path, `${NoteStore.count()} notes`);
+            log('Initialized', path, `${NoteStore.count()} local notes`, `${Object.keys(SharedStore.notes()).length} faction notes cached`);
         } catch (err) {
             reportError('Initialization failed', err);
         }

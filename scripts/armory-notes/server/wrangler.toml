@@ -1,0 +1,27 @@
+# Torn Armory Notes - Cloudflare Worker configuration.
+# This file is in a PUBLIC repo: never put secrets or the editor list here.
+#
+# Set these in the Cloudflare dashboard (Worker > Settings > Variables & Secrets):
+#   FACTION_ID    (Text)    your faction ID, e.g. 12345
+#   EDITOR_IDS    (Text)    comma-separated player IDs allowed to edit, e.g. 1234567,2345678
+#   TOKEN_SECRET  (Secret)  a long random string used to sign session tokens
+
+# Must match the Worker name you create in the dashboard.
+name = "torn-armory-notes"
+main = "worker.js"
+compatibility_date = "2026-10-01"
+
+# Keep FACTION_ID / EDITOR_IDS set in the dashboard when GitHub pushes redeploy.
+keep_vars = true
+
+# No preview URLs: only the production Worker can touch the database.
+preview_urls = false
+
+[[d1_databases]]
+binding = "DB"
+database_name = "torn-armory-notes"
+# Replace with the ID shown on your D1 database page (not a secret).
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+
+[observability]
+enabled = true

@@ -6,7 +6,7 @@ Tampermonkey userscripts for [Torn City](https://www.torn.com).
 
 | Script | Description | Install |
 |---|---|---|
-| [Armory Notes](scripts/armory-notes/) | Colored labels and notes on individual weapons and armor, by armory ID | [Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/armory-notes/armory-notes.user.js) |
+| [Armory Notes](scripts/armory-notes/) | Colored labels and notes on individual weapons and armor, by armory ID, shared with your faction | [Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/armory-notes/armory-notes.user.js) |
 | [Rental Manager](scripts/rental-manager/) | Queue of rentals needing attention, with prefilled lease extensions | [Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/rental-manager/rental-manager.user.js) |
 | [Treat Counter](scripts/treat-counter/) | Live Halloween treat counter in the sidebar | [Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/treat-counter/treat-counter.user.js) |
 
@@ -24,7 +24,7 @@ Every script in this repo:
 
 - Is a **read-only helper**: no automated clicks, attacks, purchases or other in-game actions
 - Uses the **lowest API key access level** that works, and includes Torn's API key usage disclosure
-- Stores your key only locally (Tampermonkey storage) and sends it only in the `Authorization` header to `api.torn.com`
+- Stores your key only locally (Tampermonkey storage) and sends it only in the `Authorization` header to `api.torn.com` (exception: Armory Notes' faction sharing sends a Public key to your faction's own server at sign-in; see [its README](scripts/armory-notes/))
 - Rate-limits and caches its API calls, and tags them with `comment=<ScriptName>` for your key log
 
 ## Repository layout
@@ -34,6 +34,7 @@ scripts/
   <script-name>/
     <script-name>.user.js
     README.md
+    server/          (only for scripts with a backend, e.g. armory-notes)
 ```
 
 ## License
