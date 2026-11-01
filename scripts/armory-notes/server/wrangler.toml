@@ -20,8 +20,8 @@ preview_urls = false
 [[d1_databases]]
 binding = "DB"
 database_name = "torn-armory-notes"
-# Replace with the ID shown on your D1 database page (not a secret).
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+# ID of the D1 database (not a secret: useless without Cloudflare account access).
+database_id = "300e25e1-d15c-4f5d-afe3-79ea37d76985"
 
 [observability]
 enabled = true
