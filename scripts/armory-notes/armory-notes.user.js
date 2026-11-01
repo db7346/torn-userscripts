@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         Torn Armory Notes
 // @namespace    dadgum.torn.armorynotes
-// @version      2.0.2
+// @version      2.1.0
 // @description  Colored labels and notes on individual weapons and armor (keyed by armory ID). Private notes on the Items page; shared faction notes in the Faction Armory.
 // @author       DadGum
 // @license      MIT
 // @match        https://www.torn.com/item.php*
 // @match        https://www.torn.com/factions.php*
+// @match        https://www.torn.com/trade.php*
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
@@ -40,10 +41,15 @@
  * Pages
  *   - item.php                       (rows view and thumbnail view)
  *   - factions.php#/tab=armoury      (Weapons and Armor tabs)
+ *   - trade.php                      (trade view and add-items screen:
+ *                                     faction notes on your own items,
+ *                                     read-only)
  *
  * Author: DadGum
  *
  * Changelog
+ *   2.1.0 (2026-11-01) Trade pages: faction notes show read-only on your own
+ *                      items in the trade view and on the add-items screen.
  *   2.0.2 (2026-11-01) Fixes: saving a note no longer hides other editors'
  *                      recent changes; without a key or outside the faction
  *                      the armory falls back to private notes; clearing the
@@ -234,7 +240,7 @@
         VIEWPORT_MARGIN_PX: 8,
         Z_INDEX_BASE: 100000,
 
-        PATHS: Object.freeze({ ITEMS: '/item.php', FACTIONS: '/factions.php' }),
+        PATHS: Object.freeze({ ITEMS: '/item.php', FACTIONS: '/factions.php', TRADE: '/trade.php' }),
         /** Substring of location.hash that identifies the faction armory tab. */
         FACTION_HASH_TOKEN: 'tab=armoury',
 
@@ -257,6 +263,20 @@
             FACTION_NAME: ':scope > .name',
             // Fragile: category is read from the visible "Type" column text.
             FACTION_TYPE: ':scope > .type',
+            // Trade pages (trade.php). Root is replaced or refilled on navigation.
+            TRADE_ROOT: '#trade-container',
+            // Add-items screen: rows carry the armory ID only inside React's
+            // data-reactid (".…$Secondary.$13077564088"). Fragile: this attribute
+            // disappears if Torn upgrades React; notes then stop showing here.
+            TRADE_ADD_ROW: 'li[data-group="child"][data-reactid]',
+            TRADE_ADD_NAME_WRAP: ':scope > .title-wrap .name-wrap',
+            TRADE_ADD_NAME: '.t-overflow',
+            TRADE_ADD_IMG: ':scope > .title-wrap img[src*="/images/items/"]',
+            // Trade view: only your own items have an armory ID, inside the
+            // "Remove from trade" link. The other person's items have none.
+            TRADE_VIEW_ROW: '.trade-cont .user .cont > li ul.desc > li',
+            TRADE_VIEW_REMOVE: ':scope > .del a[href*="armoryID="]',
+            TRADE_VIEW_NAME: ':scope > .name',
         }),
     });
 
@@ -269,6 +289,7 @@
         kindBadge: `${PREFIX}-btn--badge`,
         kindFaction: `${PREFIX}-btn--faction`,
         kindShared: `${PREFIX}-btn--shared`,
+        kindTrade: `${PREFIX}-btn--trade`,
         btnHidden: `${PREFIX}-btn--hidden`,
         btnReadOnly: `${PREFIX}-btn--ro`,
         popMeta: `${PREFIX}-pop-meta`,
@@ -416,6 +437,8 @@
      * @property {(row: Element) => string} getItemId             - Item type ID.
      * @property {(row: Element) => string} getName               - Item display name.
      * @property {MountSpec[]} mounts                             - Button mount points.
+     * @property {boolean} [anyCategory]                          - Skip the category filter
+     *   (pages that only show existing faction notes).
      */
 
     /* =========================================================================
@@ -730,6 +753,34 @@
             }
             if (current.length) chunks.push(current);
             return chunks;
+        },
+
+        /**
+         * Armory ID from a React id like ".1.2.1.$=10:0.2:$Secondary.$13077564088".
+         * @param {string|null|undefined} reactId - data-reactid value.
+         * @returns {{id: string, category: string}|null} Parsed parts, or null.
+         */
+        parseTradeReactId(reactId) {
+            const m = /\$([^.$]+)\.\$(\d{1,20})$/.exec(String(reactId ?? ''));
+            return m ? { category: m[1], id: m[2] } : null;
+        },
+
+        /**
+         * Armory ID from a trade "remove" link (…&armoryID=13077564088&…).
+         * @param {string|null|undefined} href - Link href.
+         * @returns {string|undefined} Armory ID.
+         */
+        armoryIdFromHref(href) {
+            return /[?&#]armoryID=(\d{1,20})(?:&|$)/.exec(String(href ?? ''))?.[1];
+        },
+
+        /**
+         * Item type ID from an item image URL (/images/items/18/large.png).
+         * @param {string|null|undefined} src - Image src.
+         * @returns {string} Item ID or ''.
+         */
+        itemIdFromImage(src) {
+            return /\/images\/items\/(\d{1,10})\//.exec(String(src ?? ''))?.[1] ?? '';
         },
 
         /**
@@ -1638,6 +1689,8 @@
 .${CLS.kindFaction}{position:absolute;right:2px;top:50%;transform:translateY(-50%);
   max-width:${CONFIG.FACTION_PILL_MAX_PX}px;}
 .${CLS.kindShared}{margin-left:4px;max-width:${CONFIG.ITEMS_PILL_MAX_PX}px;box-shadow:inset 0 0 0 1px rgba(255,255,255,.55);}
+.${CLS.kindTrade}{margin:0 4px;max-width:${CONFIG.ITEMS_PILL_MAX_PX}px;box-shadow:inset 0 0 0 1px rgba(255,255,255,.55);
+  float:none;vertical-align:middle;}
 .${CLS.btnReadOnly}{cursor:help;}
 .${CLS.btnHidden}{display:none !important;}
 ${colorRules}
@@ -1885,7 +1938,7 @@ ${colorRules}
             const id = btn.dataset[DATA_ID];
             const src = sourceOf(btn);
             const note = src.get(id);
-            const editable = src.canEdit();
+            const editable = isEditable(btn);
             const tip = el('div', { cls: CLS.tip, attrs: { role: 'tooltip' } });
             if (note) {
                 if (note.label) {
@@ -2021,7 +2074,7 @@ ${colorRules}
             e.preventDefault();
             e.stopPropagation();
             // Read-only for faction viewers (editor rights are checked again by the server).
-            if (!sourceOf(btn).canEdit()) return;
+            if (!isEditable(btn)) return;
             Tooltip.hide();
             try {
                 Editor.open(btn);
@@ -2036,12 +2089,26 @@ ${colorRules}
         return btn;
     }
 
+    /**
+     * Whether clicking this button may open the editor. Trade-page pills are
+     * always read-only (trades are where mistakes cost money).
+     * @param {HTMLElement} btn - Note button.
+     * @returns {boolean} True if editable.
+     */
+    function isEditable(btn) {
+        return btn.dataset[DATA_KIND] !== 'trade' && sourceOf(btn).canEdit();
+    }
+
+    /** Button kinds that only appear when a note exists (never offer "add"). */
+    const NOTE_ONLY_KINDS = new Set(['shared', 'trade']);
+
     /** Class for each button kind. */
     const KIND_CLASS = Object.freeze({
         pill: CLS.kindPill,
         badge: CLS.kindBadge,
         faction: CLS.kindFaction,
         shared: CLS.kindShared,
+        trade: CLS.kindTrade,
     });
 
     /**
@@ -2056,8 +2123,8 @@ ${colorRules}
         const kind = btn.dataset[DATA_KIND];
         const src = sourceOf(btn);
         const note = src.get(btn.dataset[DATA_ID]);
-        const editable = src.canEdit();
-        const hidden = !note && (!editable || kind === 'shared');
+        const editable = isEditable(btn);
+        const hidden = !note && (!editable || NOTE_ONLY_KINDS.has(kind));
         const name = btn.dataset[DATA_NAME] || 'item';
 
         btn.className = [
@@ -2070,9 +2137,9 @@ ${colorRules}
         ].filter(Boolean).join(' ');
 
         btn.replaceChildren();
-        if (kind === 'shared') btn.append(createSharedIcon());
+        if (NOTE_ONLY_KINDS.has(kind)) btn.append(createSharedIcon());
         if (note?.label) btn.append(el('span', { cls: CLS.label, text: note.label }));
-        else if (kind !== 'shared') btn.append(createTagIcon());
+        else if (!NOTE_ONLY_KINDS.has(kind)) btn.append(createTagIcon());
 
         const what = src.kind === 'shared' ? 'Faction note' : 'Note';
         let aria = `Add ${what.toLowerCase()} to ${name}`;
@@ -2759,6 +2826,53 @@ ${colorRules}
         ],
     };
 
+    /** Trade page, add-items screen: your inventory, faction notes read-only. @type {PageAdapter} */
+    const TRADE_ADD_ADAPTER = {
+        name: 'trade-add',
+        rowSelector: CONFIG.SEL.TRADE_ADD_ROW,
+        anyCategory: true, // faction notes only exist on weapons/armor anyway
+        getId: (row) => Data.parseTradeReactId(row.getAttribute('data-reactid'))?.id,
+        getCategory: (row) => Data.parseTradeReactId(row.getAttribute('data-reactid'))?.category,
+        getItemId: (row) => Data.itemIdFromImage(row.querySelector(CONFIG.SEL.TRADE_ADD_IMG)?.getAttribute('src')),
+        getName: (row) => row.querySelector(`${CONFIG.SEL.TRADE_ADD_NAME_WRAP} ${CONFIG.SEL.TRADE_ADD_NAME}`)?.textContent.trim() ?? '',
+        mounts: [
+            {
+                kind: 'trade',
+                source: () => 'shared',
+                findHost: (row) => row.querySelector(CONFIG.SEL.TRADE_ADD_NAME_WRAP),
+                attach: (host, btn) => {
+                    const nameEl = host.querySelector(`:scope > ${CONFIG.SEL.TRADE_ADD_NAME}`);
+                    if (nameEl) nameEl.after(btn);
+                    else host.append(btn);
+                },
+            },
+        ],
+    };
+
+    /** Trade page, trade view: your own items only (theirs carry no armory ID). @type {PageAdapter} */
+    const TRADE_VIEW_ADAPTER = {
+        name: 'trade-view',
+        rowSelector: CONFIG.SEL.TRADE_VIEW_ROW,
+        anyCategory: true,
+        getId: (row) => Data.armoryIdFromHref(row.querySelector(CONFIG.SEL.TRADE_VIEW_REMOVE)?.getAttribute('href')),
+        getCategory: () => '',
+        getItemId: (row) => /[?&#]itemID=(\d{1,10})/.exec(row.querySelector(CONFIG.SEL.TRADE_VIEW_REMOVE)?.getAttribute('href') ?? '')?.[1] ?? '',
+        getName: (row) => ownText(row.querySelector(CONFIG.SEL.TRADE_VIEW_NAME)),
+        mounts: [
+            {
+                kind: 'trade',
+                source: () => 'shared',
+                findHost: (row) => row.querySelector(CONFIG.SEL.TRADE_VIEW_NAME),
+                attach: (host, btn) => {
+                    // Right after the item name, before buttons other scripts add.
+                    const firstEl = [...host.children].find((c) => !c.classList.contains(CLS.btn));
+                    if (firstEl) host.insertBefore(btn, firstEl);
+                    else host.append(btn);
+                },
+            },
+        ],
+    };
+
     /**
      * Add or refresh note buttons on one row. Idempotent: unchanged buttons
      * are left alone so our own DOM writes do not retrigger observers.
@@ -2769,7 +2883,7 @@ ${colorRules}
     function decorateRow(row, adapter) {
         const id = adapter.getId(row);
         if (!Data.isValidArmoryId(id)) return;
-        if (!TRACKED.has(adapter.getCategory(row))) return;
+        if (!adapter.anyCategory && !TRACKED.has(adapter.getCategory(row))) return;
         if (adapter === FACTION_ADAPTER) SeenIds.add(id);
 
         for (const spec of adapter.mounts) {
@@ -2999,9 +3113,42 @@ ${colorRules}
             return;
         }
         new RootWatcher(ITEMS_ADAPTER).attach(root);
+        await refreshSharedIfStale();
+    }
+
+    /**
+     * Refresh faction notes once if the cache is older than a minute
+     * (pages without polling: Items and Trade).
+     * @returns {Promise<void>}
+     */
+    async function refreshSharedIfStale() {
         if (Shared.isActive() && Date.now() - SharedStore.fetchedAt() > CONFIG.ITEMS_SHARED_MAX_AGE_MS) {
             await Shared.refreshAndRender({ quiet: true });
         }
+    }
+
+    /**
+     * Trade page: watch the trade container on both the trade view and the
+     * add-items screen. Torn swaps the content on in-page navigation, so the
+     * watchers re-attach whenever the container is replaced.
+     * @returns {void}
+     */
+    function startTradePage() {
+        let syncToken = 0;
+        const sync = async () => {
+            const token = ++syncToken;
+            const root = await waitForElement(CONFIG.SEL.TRADE_ROOT, CONFIG.WAIT_FOR_TIMEOUT_MS);
+            if (token !== syncToken || !root) return;
+            addWatcher.attach(root);
+            viewWatcher.attach(root);
+        };
+        const addWatcher = new RootWatcher(TRADE_ADD_ADAPTER, () => sync());
+        const viewWatcher = new RootWatcher(TRADE_VIEW_ADAPTER);
+        window.addEventListener('hashchange', () => {
+            Tooltip.hide();
+            sync();
+        });
+        sync().then(() => refreshSharedIfStale()).catch((err) => reportError('Trade page', err));
     }
 
     /**
@@ -3117,6 +3264,8 @@ ${colorRules}
             const path = location.pathname;
             if (path === CONFIG.PATHS.ITEMS) {
                 startItemsPage().catch((err) => reportError('Items page', err));
+            } else if (path === CONFIG.PATHS.TRADE) {
+                startTradePage();
             } else if (path === CONFIG.PATHS.FACTIONS) {
                 startFactionPage();
             }

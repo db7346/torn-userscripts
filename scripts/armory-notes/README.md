@@ -14,6 +14,7 @@ Attach a colored label and a note to individual weapons and armor. Notes are tie
 - The label shows as a colored pill; hover it to read the full note
 - **Faction Armory:** shared faction notes, refreshed every 45 seconds while the tab is visible. Hover shows who edited a note last and when.
 - **Items page:** your private notes (row and thumbnail views), plus a faction pill (with a people icon) when an item has a faction note. Editors can click it to edit or delete the faction note, which is handy for items in your own inventory; everyone else sees it read-only.
+- **Trade pages:** faction notes show read-only on your own items, both in the trade view and on the add-items screen, so you can see a faction-owned item before you send it
 - Upload your existing local notes to the faction in one step
 - Label autocomplete, plus backup and restore of local notes
 
@@ -79,6 +80,8 @@ That is about **1 Torn API call per 12 hours**, and about **1.3 server requests 
 
 ## Known limitations
 
+- Trade pages show notes only on **your own** items. Torn's trade page doesn't include an item ID for the other person's items, so their side can't be matched.
+- On the trade add-items screen, the item ID is read from an internal React attribute (`data-reactid`). If Torn updates its page framework, notes stop showing there until the script is updated; everything else keeps working.
 - On the Items page, faction notes show in row view only, not thumbnail view.
 - Edits are last-write-wins. If two editors change the same note at once, the later save wins; both changes are in the server's history.
 - Local notes are per browser. Use Export/Import to move them.
@@ -88,6 +91,7 @@ That is about **1 Torn API call per 12 hours**, and about **1.3 server requests 
 
 ## Changelog
 
+- **2.1.0**: Trade pages. Faction notes show read-only (for everyone, editors included) on your own items in the trade view and on the add-items screen. No polling there: at most one refresh per page load.
 - **2.0.2**: Fixes: saving a faction note no longer hides another editor's change made moments earlier; without a key, or outside the faction, the Faction Armory falls back to private notes instead of showing nothing; clearing the cache during a refresh no longer loses notes; an upload that fails partway reports what was moved; uploads are split by size; refreshes only redraw notes that changed. The server rejects oversized requests before reading them.
 - **2.0.1**: Editors can edit or delete faction notes from the Items page by clicking the faction pill (for items in your own inventory). The faction's server URL is now built in.
 - **2.0.0**: Shared faction notes. Faction Armory notes are stored on a faction-run Cloudflare server and refresh every 45 s while visible, with editors-only editing and "last edited by". Adds the Settings panel (server URL + Public key), uploading (moving) local notes to the faction, and read-only faction pills on the Items page. Menu commands for local notes are renamed "local".
