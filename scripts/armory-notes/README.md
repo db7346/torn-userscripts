@@ -14,7 +14,7 @@ Attach a colored label and a note to individual weapons and armor. Notes are tie
 - The label shows as a colored pill; hover it to read the full note
 - **Faction Armory:** shared faction notes, refreshed every 45 seconds while the tab is visible. Hover shows who edited a note last and when.
 - **Items page:** your private notes (row and thumbnail views), plus a faction pill (with a people icon) when an item has a faction note. Editors can click it to edit or delete the faction note, which is handy for items in your own inventory; everyone else sees it read-only.
-- **Trade pages:** faction notes show read-only on your own items, both in the trade view and on the add-items screen, so you can see a faction-owned item before you send it
+- **Trade pages:** faction notes show read-only on your own items, in the trade view, on the add-items screen and on its confirmation step, so you can see a faction-owned item before you send it
 - Upload your existing local notes to the faction in one step
 - Label autocomplete, plus backup and restore of local notes
 
@@ -91,6 +91,7 @@ That is about **1 Torn API call per 12 hours**, and about **1.3 server requests 
 
 ## Changelog
 
+- **2.1.1**: Trade add-items confirmation step ("Are you sure you wish to add…") now shows faction notes too.
 - **2.1.0**: Trade pages. Faction notes show read-only (for everyone, editors included) on your own items in the trade view and on the add-items screen. No polling there: at most one refresh per page load.
 - **2.0.2**: Fixes: saving a faction note no longer hides another editor's change made moments earlier; without a key, or outside the faction, the Faction Armory falls back to private notes instead of showing nothing; clearing the cache during a refresh no longer loses notes; an upload that fails partway reports what was moved; uploads are split by size; refreshes only redraw notes that changed. The server rejects oversized requests before reading them.
 - **2.0.1**: Editors can edit or delete faction notes from the Items page by clicking the faction pill (for items in your own inventory). The faction's server URL is now built in.

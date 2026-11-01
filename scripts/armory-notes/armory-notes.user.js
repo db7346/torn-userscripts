@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Armory Notes
 // @namespace    dadgum.torn.armorynotes
-// @version      2.1.0
+// @version      2.1.1
 // @description  Colored labels and notes on individual weapons and armor (keyed by armory ID). Private notes on the Items page; shared faction notes in the Faction Armory.
 // @author       DadGum
 // @license      MIT
@@ -48,6 +48,8 @@
  * Author: DadGum
  *
  * Changelog
+ *   2.1.1 (2026-11-01) Trade add-items confirmation step ("Are you sure you
+ *                      wish to add…") now shows faction notes too.
  *   2.1.0 (2026-11-01) Trade pages: faction notes show read-only on your own
  *                      items in the trade view and on the add-items screen.
  *   2.0.2 (2026-11-01) Fixes: saving a note no longer hides other editors'
@@ -265,10 +267,13 @@
             FACTION_TYPE: ':scope > .type',
             // Trade pages (trade.php). Root is replaced or refilled on navigation.
             TRADE_ROOT: '#trade-container',
-            // Add-items screen: rows carry the armory ID only inside React's
-            // data-reactid (".…$Secondary.$13077564088"). Fragile: this attribute
-            // disappears if Torn upgrades React; notes then stop showing here.
-            TRADE_ADD_ROW: 'li[data-group="child"][data-reactid]',
+            // Add-items screen and its confirmation step: rows carry the armory ID
+            // only inside React's data-reactid (".…$Secondary.$13077564088" in the
+            // item list, ".0.3.0.$13077564088" in the confirmation list). Rows are
+            // filtered by that pattern. Fragile: this attribute disappears if
+            // Torn upgrades React; notes then stop showing here.
+            // Candidate rows; only those whose id ends in "$<digits>" are used.
+            TRADE_ADD_ROW: 'li[data-reactid]',
             TRADE_ADD_NAME_WRAP: ':scope > .title-wrap .name-wrap',
             TRADE_ADD_NAME: '.t-overflow',
             TRADE_ADD_IMG: ':scope > .title-wrap img[src*="/images/items/"]',
@@ -756,13 +761,14 @@
         },
 
         /**
-         * Armory ID from a React id like ".1.2.1.$=10:0.2:$Secondary.$13077564088".
+         * Armory ID from a React id: ".1.2.1.$=10:0.2:$Secondary.$13077564088"
+         * (item list) or ".0.3.0.$13077564088" (confirmation list, no category).
          * @param {string|null|undefined} reactId - data-reactid value.
          * @returns {{id: string, category: string}|null} Parsed parts, or null.
          */
         parseTradeReactId(reactId) {
-            const m = /\$([^.$]+)\.\$(\d{1,20})$/.exec(String(reactId ?? ''));
-            return m ? { category: m[1], id: m[2] } : null;
+            const m = /(?:\$([^.$]+)\.)?\.?\$(\d{1,20})$/.exec(String(reactId ?? ''));
+            return m ? { category: m[1] ?? '', id: m[2] } : null;
         },
 
         /**
