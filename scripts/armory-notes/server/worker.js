@@ -98,8 +98,15 @@ function json(request, status, body) {
  * @throws {HttpError} 413 if too large, 400 if not JSON.
  */
 async function readJson(request) {
+    // Reject oversized bodies before reading them when the size is declared.
+    const declared = Number(request.headers.get('Content-Length'));
+    if (Number.isFinite(declared) && declared > CONFIG.MAX_BODY_BYTES) {
+        throw new HttpError(413, 'too_large', 'Request body is too large.');
+    }
     const text = await request.text();
-    if (text.length > CONFIG.MAX_BODY_BYTES) throw new HttpError(413, 'too_large', 'Request body is too large.');
+    if (new TextEncoder().encode(text).length > CONFIG.MAX_BODY_BYTES) {
+        throw new HttpError(413, 'too_large', 'Request body is too large.');
+    }
     try {
         return JSON.parse(text);
     } catch {

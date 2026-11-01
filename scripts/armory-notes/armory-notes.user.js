@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Armory Notes
 // @namespace    dadgum.torn.armorynotes
-// @version      2.0.1
+// @version      2.0.2
 // @description  Colored labels and notes on individual weapons and armor (keyed by armory ID). Private notes on the Items page; shared faction notes in the Faction Armory.
 // @author       DadGum
 // @license      MIT
@@ -44,6 +44,12 @@
  * Author: DadGum
  *
  * Changelog
+ *   2.0.2 (2026-11-01) Fixes: saving a note no longer hides other editors'
+ *                      recent changes; without a key or outside the faction
+ *                      the armory falls back to private notes; clearing the
+ *                      cache mid-refresh is safe; partial uploads are
+ *                      reported correctly; uploads split by size; polls only
+ *                      redraw notes that changed.
  *   2.0.1 (2026-11-01) Editors can edit faction notes from the Items page
  *                      (click the faction pill), for items not in the
  *                      faction armory. Default server URL set.
@@ -141,6 +147,8 @@
         SHARED_CACHE_KEY: 'tms-armorynotes:shared:v1',
         SEEN_FACTION_KEY: 'tms-armorynotes:seen:v1',
         SETUP_PROMPTED_KEY: 'tms-armorynotes:setup-prompted:v1',
+        SHARED_FETCHED_KEY: 'tms-armorynotes:shared-fetched:v1',
+        AUTH_FAILURE_KEY: 'tms-armorynotes:auth-failure:v1',
         SHARED_CACHE_VERSION: 1,
         /** Server URLs must be HTTPS with no query or fragment. */
         SERVER_URL_PATTERN: /^https:\/\/[A-Za-z0-9.-]+(?::\d+)?(?:\/[^\s?#]*)?$/,
@@ -161,6 +169,8 @@
         SHARED_MAX_PAGES: 5,
         /** Notes per upload request (server accepts up to 1000). */
         UPLOAD_CHUNK: 500,
+        /** Max upload request size in bytes (server accepts up to 512 KiB). */
+        UPLOAD_MAX_BYTES: 400 * 1024,
         /** Armory IDs remembered from the faction armory (pre-ticks the upload list). */
         SEEN_MAX: 5000,
         SEEN_FLUSH_MS: 2000,
@@ -695,6 +705,49 @@
         },
 
         /**
+         * Split notes into upload chunks, each at most `maxCount` notes and
+         * `maxBytes` of JSON. Only the fields the server accepts are sent.
+         * @param {Array<Note & {armoryId: string}>} notes - Notes.
+         * @param {number} maxCount - Max notes per chunk.
+         * @param {number} maxBytes - Max UTF-8 bytes of JSON per chunk.
+         * @returns {Object[][]} Chunks.
+         */
+        chunkForUpload(notes, maxCount, maxBytes) {
+            const enc = new TextEncoder();
+            const chunks = [];
+            let current = [];
+            let size = 16; // {"notes":[]}
+            for (const n of notes) {
+                const item = { armoryId: n.armoryId, label: n.label, color: n.color, text: n.text, itemName: n.itemName, itemId: n.itemId };
+                const len = enc.encode(JSON.stringify(item)).length + 1;
+                if (current.length && (current.length >= maxCount || size + len > maxBytes)) {
+                    chunks.push(current);
+                    current = [];
+                    size = 16;
+                }
+                current.push(item);
+                size += len;
+            }
+            if (current.length) chunks.push(current);
+            return chunks;
+        },
+
+        /**
+         * Short non-cryptographic hash (FNV-1a), used to fingerprint settings
+         * without storing the API key a second time.
+         * @param {string} text - Input.
+         * @returns {string} 8-character hex hash.
+         */
+        hash(text) {
+            let h = 0x811c9dc5;
+            for (let i = 0; i < text.length; i += 1) {
+                h ^= text.charCodeAt(i);
+                h = Math.imul(h, 0x01000193) >>> 0;
+            }
+            return h.toString(16).padStart(8, '0');
+        },
+
+        /**
          * Readable message for a Torn API error code.
          * @param {number} code - ApiError code.
          * @returns {string} Message.
@@ -905,6 +958,8 @@
         _serverUrl: '',
         /** @type {Promise<string[]>|null} */
         _inflight: null,
+        /** Bumped on every reset so a refresh started before it is discarded. */
+        _gen: 0,
 
         /**
          * Load the cache for the configured server (discarded if for another server).
@@ -921,7 +976,8 @@
                 if (n?.note) this._notes[id] = n.note;
             }
             this._since = Number.isFinite(c.since) ? c.since : 0;
-            this._fetchedAt = Number.isFinite(c.fetchedAt) ? c.fetchedAt : 0;
+            const fetched = Storage.readSafe(CONFIG.SHARED_FETCHED_KEY, 0);
+            this._fetchedAt = Number.isFinite(fetched) ? fetched : 0;
         },
 
         /**
@@ -930,6 +986,8 @@
          * @returns {void}
          */
         _reset(serverUrl) {
+            this._gen += 1;
+            this._inflight = null;
             this._notes = {};
             this._since = 0;
             this._fetchedAt = 0;
@@ -943,6 +1001,7 @@
         clear() {
             this._reset(SettingsStore.get().serverUrl);
             Storage.write(CONFIG.SHARED_CACHE_KEY, null);
+            Storage.write(CONFIG.SHARED_FETCHED_KEY, 0);
         },
 
         /**
@@ -954,7 +1013,6 @@
                 version: CONFIG.SHARED_CACHE_VERSION,
                 serverUrl: this._serverUrl,
                 since: this._since,
-                fetchedAt: this._fetchedAt,
                 notes: this._notes,
             });
         },
@@ -987,14 +1045,17 @@
         /**
          * Apply server notes (including deletions) to the cache.
          * @param {unknown[]} list - ServerNote objects.
+         * @param {{advanceSince?: boolean}} [opts] - advanceSince: move the poll
+         *   marker forward. Only full poll results may do this; a single saved
+         *   note must not, or other editors' slightly older changes are skipped.
          * @returns {string[]} Armory IDs whose note changed.
          */
-        apply(list) {
+        apply(list, { advanceSince = true } = {}) {
             const changed = [];
             for (const raw of list) {
                 const n = Data.normalizeSharedNote(raw);
                 if (!n) continue;
-                this._since = Math.max(this._since, n.updated);
+                if (advanceSince) this._since = Math.max(this._since, n.updated);
                 const prev = this._notes[n.id];
                 if (!n.note) {
                     if (prev) {
@@ -1016,9 +1077,10 @@
          */
         refresh() {
             if (!this._inflight) {
-                this._inflight = this._refresh().finally(() => {
-                    this._inflight = null;
+                const p = this._refresh().finally(() => {
+                    if (this._inflight === p) this._inflight = null;
                 });
+                this._inflight = p;
             }
             return this._inflight;
         },
@@ -1030,16 +1092,23 @@
         async _refresh() {
             const url = SettingsStore.get().serverUrl;
             if (url !== this._serverUrl) this._reset(url);
+            const gen = this._gen;
+            const sinceBefore = this._since;
             const changed = [];
             for (let page = 0; page < CONFIG.SHARED_MAX_PAGES; page += 1) {
                 const data = await Server.request('GET', `/notes?since=${encodeURIComponent(String(this._since))}`);
+                // The cache was cleared or the server changed while waiting: drop this result.
+                if (gen !== this._gen) return [];
                 if (!data || !Array.isArray(data.notes)) throw new ServerError('bad_response', 'Unexpected response from the notes server.');
                 changed.push(...this.apply(data.notes));
                 if (typeof data.canEdit === 'boolean') Session.setCanEdit(data.canEdit);
                 if (!data.hasMore) break;
             }
             this._fetchedAt = Date.now();
-            this._persist();
+            Storage.write(CONFIG.SHARED_FETCHED_KEY, this._fetchedAt);
+            // The poll query uses >=, so the newest note comes back every time;
+            // only rewrite the cache when something actually changed.
+            if (changed.length || this._since !== sinceBefore) this._persist();
             return changed;
         },
 
@@ -1052,7 +1121,7 @@
          */
         async save(id, fields) {
             const data = await Server.request('PUT', `/notes/${encodeURIComponent(id)}`, { body: fields });
-            this.apply([data?.note]);
+            this.apply([data?.note], { advanceSince: false });
             this._persist();
         },
 
@@ -1064,26 +1133,30 @@
          */
         async remove(id) {
             const data = await Server.request('DELETE', `/notes/${encodeURIComponent(id)}`);
-            this.apply([data?.note ?? { armoryId: id, deleted: true, updated: Date.now() }]);
+            this.apply([data?.note ?? { armoryId: id, deleted: true, updated: Date.now() }], { advanceSince: false });
             this._persist();
         },
 
         /**
          * Upload notes; the server never overwrites an existing faction note.
+         * Sent in chunks limited by count and by size.
          * @param {Array<Note & {armoryId: string}>} notes - Notes to upload.
          * @returns {Promise<{added: string[], skipped: string[], invalid: string[]}>} Result.
-         * @throws {ServerError} On failure (earlier chunks may already be saved).
+         * @throws {ServerError} On failure. `err.partial` holds the result of the
+         *   chunks that were saved before the failure.
          */
         async importNotes(notes) {
             const result = { added: [], skipped: [], invalid: [] };
-            for (let i = 0; i < notes.length; i += CONFIG.UPLOAD_CHUNK) {
-                const chunk = notes.slice(i, i + CONFIG.UPLOAD_CHUNK).map((n) => ({
-                    armoryId: n.armoryId, label: n.label, color: n.color, text: n.text, itemName: n.itemName, itemId: n.itemId,
-                }));
-                const data = await Server.request('POST', '/notes/import', { body: { notes: chunk } });
-                for (const key of ['added', 'skipped', 'invalid']) {
-                    if (Array.isArray(data?.[key])) result[key].push(...data[key].map(String));
+            try {
+                for (const chunk of Data.chunkForUpload(notes, CONFIG.UPLOAD_CHUNK, CONFIG.UPLOAD_MAX_BYTES)) {
+                    const data = await Server.request('POST', '/notes/import', { body: { notes: chunk } });
+                    for (const key of ['added', 'skipped', 'invalid']) {
+                        if (Array.isArray(data?.[key])) result[key].push(...data[key].map(String));
+                    }
                 }
+            } catch (err) {
+                if (err && typeof err === 'object') err.partial = result;
+                throw err;
             }
             return result;
         },
@@ -1236,11 +1309,15 @@
          * @throws {ServerError} On any failure.
          */
         async request(method, path, { body, auth = true, retried = false } = {}) {
-            const { serverUrl } = SettingsStore.get();
+            let { serverUrl } = SettingsStore.get();
             if (!serverUrl) throw new ServerError('not_configured', 'Faction sharing is not set up. Open Settings from the Tampermonkey menu.');
             const headers = { Accept: 'application/json' };
             if (body !== undefined) headers['Content-Type'] = 'application/json';
-            if (auth) headers.Authorization = `Bearer ${(await Session.ensure()).token}`;
+            if (auth) {
+                const session = await Session.ensure();
+                headers.Authorization = `Bearer ${session.token}`;
+                serverUrl = session.serverUrl; // the token only belongs to the server that issued it
+            }
             await this._limiter.acquire();
             const res = await gmRequest({ method, url: serverUrl + path, headers, body: body === undefined ? undefined : JSON.stringify(body) });
 
@@ -1278,18 +1355,67 @@
         _inflight: null,
         /**
          * Last sign-in failure, so a bad key or non-member is not re-checked
-         * with Torn on every poll. Cleared when settings change.
+         * with Torn on every poll. Permanent failures (wrong key, not in the
+         * faction) are also saved, so they are not re-checked on every page
+         * load either. Cleared when settings change or on Save & sign in.
          * @type {{sig: string, err: ServerError, until: number}|null}
          */
         _failure: null,
+        _failureLoaded: false,
 
         /**
-         * Settings fingerprint (memory only, never logged).
+         * Settings fingerprint (a hash, so the key is not stored twice).
          * @param {Settings} s - Settings.
          * @returns {string} Fingerprint.
          */
         _sig(s) {
-            return `${s.serverUrl}\n${s.apiKey}`;
+            return Data.hash(`${s.serverUrl}\n${s.apiKey}`);
+        },
+
+        /**
+         * Current failure for these settings, loading a saved permanent one once.
+         * @param {Settings} settings - Current settings.
+         * @returns {{sig: string, err: ServerError, until: number}|null} Failure.
+         */
+        _currentFailure(settings) {
+            if (!this._failure && !this._failureLoaded) {
+                this._failureLoaded = true;
+                const f = Storage.readSafe(CONFIG.AUTH_FAILURE_KEY, null);
+                if (f && typeof f.sig === 'string' && typeof f.message === 'string') {
+                    const err = new ServerError(String(f.code ?? 'auth_failed'), f.message, { needsKey: Boolean(f.needsKey) });
+                    err.fromCache = true;
+                    this._failure = { sig: f.sig, err, until: Infinity };
+                }
+            }
+            const f = this._failure;
+            return f && f.sig === this._sig(settings) && Date.now() < f.until ? f : null;
+        },
+
+        /**
+         * Whether sign-in is known to fail until the user changes something
+         * (wrong key, not in the faction).
+         * @returns {boolean} True if blocked.
+         */
+        isBlocked() {
+            return this._currentFailure(SettingsStore.get())?.until === Infinity;
+        },
+
+        /**
+         * Message of the current sign-in failure, if any.
+         * @returns {string} Message or ''.
+         */
+        failureMessage() {
+            return this._currentFailure(SettingsStore.get())?.err.message ?? '';
+        },
+
+        /**
+         * Forget any remembered sign-in failure (memory and storage).
+         * @returns {void}
+         */
+        clearFailure() {
+            this._failure = null;
+            this._failureLoaded = true;
+            Storage.write(CONFIG.AUTH_FAILURE_KEY, null);
         },
 
         /**
@@ -1325,8 +1451,8 @@
                 this._mem = stored;
                 return Promise.resolve(stored);
             }
-            const f = this._failure;
-            if (f && f.sig === this._sig(settings) && Date.now() < f.until) return Promise.reject(f.err);
+            const f = this._currentFailure(settings);
+            if (f) return Promise.reject(f.err);
             if (!this._inflight) {
                 this._inflight = this._signIn(settings).finally(() => {
                     this._inflight = null;
@@ -1350,11 +1476,11 @@
                 data = await Server.request('POST', '/auth', { body: { key: settings.apiKey }, auth: false });
             } catch (err) {
                 const mapped = this._mapAuthError(err);
-                this._failure = {
-                    sig: this._sig(settings),
-                    err: mapped,
-                    until: mapped.transient ? Date.now() + CONFIG.BACKOFF_MS : Infinity,
-                };
+                const sig = this._sig(settings);
+                this._failure = { sig, err: mapped, until: mapped.transient ? Date.now() + CONFIG.BACKOFF_MS : Infinity };
+                if (!mapped.transient) {
+                    Storage.write(CONFIG.AUTH_FAILURE_KEY, { sig, code: mapped.code, message: mapped.message, needsKey: mapped.needsKey });
+                }
                 throw mapped;
             }
             if (!data || typeof data.token !== 'string' || !Number.isFinite(data.expiresAt)) {
@@ -1369,7 +1495,7 @@
                 canEdit: data.canEdit === true,
                 serverUrl: settings.serverUrl,
             };
-            this._failure = null;
+            this.clearFailure();
             this._mem = session;
             Storage.write(CONFIG.SESSION_KEY, session);
             log('Signed in as', session.player.name, session.canEdit ? '(editor)' : '(viewer)');
@@ -1415,7 +1541,7 @@
          */
         clear() {
             this._mem = null;
-            this._failure = null;
+            this.clearFailure();
             Storage.write(CONFIG.SESSION_KEY, null);
         },
     };
@@ -1433,6 +1559,15 @@
         },
 
         /**
+         * Whether faction notes are in use: a server and key are set and sign-in
+         * is not known to fail. Otherwise the Faction Armory uses private notes.
+         * @returns {boolean} True if active.
+         */
+        isActive() {
+            return this.isConfigured() && Boolean(SettingsStore.get().apiKey) && !Session.isBlocked();
+        },
+
+        /**
          * Whether the signed-in member may edit faction notes.
          * @returns {boolean} True for editors.
          */
@@ -1447,15 +1582,18 @@
          * @returns {Promise<boolean>} True on success.
          */
         async refreshAndRender({ quiet = false } = {}) {
-            if (!this.isConfigured() || !SettingsStore.get().apiKey) return false;
+            if (!this.isActive()) return false;
+            const before = `${this.isActive()}|${this.canEdit()}`;
+            const stateChanged = () => before !== `${this.isActive()}|${this.canEdit()}`;
             try {
-                await SharedStore.refresh();
+                const changed = await SharedStore.refresh();
                 this._lastError = '';
-                refreshAll();
+                if (stateChanged()) rerenderAll();
+                else changed.forEach((id) => refreshId(id));
                 return true;
             } catch (err) {
                 handleSharedError('Faction notes', err, { quiet });
-                refreshAll(); // canEdit may have changed
+                if (stateChanged()) rerenderAll(); // e.g. editor rights removed, or sign-in now blocked
                 return false;
             }
         },
@@ -1675,7 +1813,7 @@ ${colorRules}
      */
     function handleSharedError(context, err, { quiet = false } = {}) {
         const message = err instanceof Error ? err.message : String(err);
-        if (err instanceof ServerError && err.needsKey && !handleSharedError.promptedKey) {
+        if (err instanceof ServerError && err.needsKey && !err.fromCache && !handleSharedError.promptedKey) {
             handleSharedError.promptedKey = true;
             openSettingsDialog(message);
         }
@@ -1966,6 +2104,16 @@ ${colorRules}
      */
     function refreshAll() {
         document.querySelectorAll(`.${CLS.btn}`).forEach((btn) => renderNoteButton(btn));
+    }
+
+    /**
+     * Re-decorate every watched row (picks up a switch between faction and
+     * private notes) and re-render every button.
+     * @returns {void}
+     */
+    function rerenderAll() {
+        Watchers.forEach((w) => w.scan());
+        refreshAll();
     }
 
     /* ---- Editor popover --------------------------------------------------- */
@@ -2287,7 +2435,8 @@ ${colorRules}
      */
     function sessionStatusText() {
         if (!Shared.isConfigured()) return 'Faction sharing is off (no server URL). The Faction Armory uses local notes.';
-        if (!SettingsStore.get().apiKey) return 'Not signed in: add your Public API key.';
+        if (!SettingsStore.get().apiKey) return 'Not signed in: add your Public API key. Until then the Faction Armory shows your private notes.';
+        if (Session.isBlocked()) return `Faction notes are off: ${Session.failureMessage()}\nThe Faction Armory shows your private notes.`;
         const s = Session.peek();
         if (!s) return 'Not signed in yet.';
         const role = s.canEdit ? 'editor (can change faction notes)' : 'viewer (read-only)';
@@ -2327,6 +2476,7 @@ ${colorRules}
             }
             const before = SettingsStore.get();
             SettingsStore.set({ serverUrl, apiKey });
+            Session.clearFailure(); // an explicit Save always tries again (e.g. after joining the faction)
             if (before.serverUrl !== serverUrl || before.apiKey !== apiKey) {
                 Session.clear();
                 if (before.serverUrl !== serverUrl) SharedStore.clear();
@@ -2344,12 +2494,12 @@ ${colorRules}
                 await Session.ensure();
                 await SharedStore.refresh();
                 Shared._lastError = '';
-                refreshAll();
+                rerenderAll();
                 status.textContent = sessionStatusText();
                 Modal.close();
                 Notice.show(`Signed in. ${Object.keys(SharedStore.notes()).length} faction notes loaded.`);
             } catch (err) {
-                refreshAll();
+                rerenderAll();
                 status.textContent = `Sign-in failed: ${err instanceof Error ? err.message : String(err)}`;
             }
         };
@@ -2479,9 +2629,21 @@ ${colorRules}
                         try {
                             result = await SharedStore.importNotes(chosen);
                         } catch (err) {
-                            counter.textContent = 'Upload failed. Nothing was removed locally.';
+                            const partial = err?.partial?.added ?? [];
+                            if (partial.length) {
+                                try {
+                                    NoteStore.removeMany(partial);
+                                } catch (removeErr) {
+                                    reportError('Uploaded, but could not remove the local copies', removeErr);
+                                }
+                                Modal.close();
+                                Notice.show(`Upload stopped partway: ${partial.length} note${partial.length === 1 ? ' was' : 's were'} uploaded and moved out of local notes. The rest stayed local; try again to upload them.`);
+                            } else {
+                                counter.textContent = 'Upload failed. Nothing was removed locally.';
+                            }
                             handleSharedError('Upload', err);
                             await Shared.refreshAndRender({ quiet: true });
+                            refreshAll();
                             return;
                         }
                         try {
@@ -2510,10 +2672,9 @@ ${colorRules}
      * @returns {void}
      */
     function onSharingChanged() {
-        Watchers.forEach((w) => w.scan());
-        refreshAll();
-        if (PageState.factionArmoryOpen) SharedSync.start();
-        if (!Shared.isConfigured()) SharedSync.stop();
+        rerenderAll();
+        if (PageState.factionArmoryOpen && Shared.isActive()) SharedSync.start();
+        if (!Shared.isActive()) SharedSync.stop();
     }
 
     /* ---- Page adapters (DOM reading) -------------------------------------- */
@@ -2586,8 +2747,9 @@ ${colorRules}
         mounts: [
             {
                 kind: 'faction',
-                // Faction notes when sharing is set up; otherwise local notes (v1 behavior).
-                source: () => (Shared.isConfigured() ? 'shared' : 'local'),
+                // Faction notes when signed in (or signing in); otherwise private
+                // notes, as in v1 (no server, no key, or not in the faction).
+                source: () => (Shared.isActive() ? 'shared' : 'local'),
                 findHost: (row) => row.querySelector(CONFIG.SEL.FACTION_NAME),
                 attach: (host, btn) => {
                     host.classList.add(CLS.factionHost);
@@ -2783,7 +2945,7 @@ ${colorRules}
          * @returns {void}
          */
         start() {
-            if (this._active || !Shared.isConfigured()) return;
+            if (this._active || !Shared.isActive()) return;
             this._active = true;
             this._onVisibility = () => {
                 if (!document.hidden && this._active && Date.now() - SharedStore.fetchedAt() >= CONFIG.SHARED_POLL_MS) this._tick();
@@ -2814,6 +2976,10 @@ ${colorRules}
             clearTimeout(this._timer);
             if (!this._active) return;
             if (!document.hidden) await Shared.refreshAndRender({ quiet: true });
+            if (!Shared.isActive()) {
+                this.stop(); // sign-in now blocked (wrong key, not in faction): nothing to poll
+                return;
+            }
             if (this._active) {
                 clearTimeout(this._timer);
                 this._timer = setTimeout(() => this._tick(), CONFIG.SHARED_POLL_MS);
@@ -2833,7 +2999,7 @@ ${colorRules}
             return;
         }
         new RootWatcher(ITEMS_ADAPTER).attach(root);
-        if (Shared.isConfigured() && Date.now() - SharedStore.fetchedAt() > CONFIG.ITEMS_SHARED_MAX_AGE_MS) {
+        if (Shared.isActive() && Date.now() - SharedStore.fetchedAt() > CONFIG.ITEMS_SHARED_MAX_AGE_MS) {
             await Shared.refreshAndRender({ quiet: true });
         }
     }
@@ -2847,7 +3013,15 @@ ${colorRules}
         if (!Shared.isConfigured() || SettingsStore.get().apiKey) return;
         if (Storage.readSafe(CONFIG.SETUP_PROMPTED_KEY, false)) return;
         Storage.write(CONFIG.SETUP_PROMPTED_KEY, true);
-        openSettingsDialog('Welcome! Your faction shares armory notes. Add a Public API key to see them.');
+        let host = SettingsStore.get().serverUrl;
+        try {
+            host = new URL(host).host;
+        } catch (err) {
+            log('Server URL is not a valid URL');
+        }
+        openSettingsDialog(`Welcome! This copy of Armory Notes shares faction notes through ${host}. `
+            + 'If you are in that faction, add a Public API key to see them. '
+            + 'If not, click Cancel: the Faction Armory will use your private notes instead.');
     }
 
     /**
@@ -2903,8 +3077,8 @@ ${colorRules}
         };
         GM_registerMenuCommand('Settings (faction sharing)', guard('Settings', () => openSettingsDialog()));
         GM_registerMenuCommand('Refresh faction notes', guard('Refresh', () => {
-            if (!Shared.isConfigured() || !SettingsStore.get().apiKey) {
-                openSettingsDialog('Set up faction sharing first.');
+            if (!Shared.isActive()) {
+                openSettingsDialog(Session.isBlocked() ? `Faction notes are off: ${Session.failureMessage()}` : 'Set up faction sharing first.');
                 return;
             }
             Shared.refreshAndRender().then((ok) => {

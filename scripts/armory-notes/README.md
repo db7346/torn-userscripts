@@ -31,9 +31,9 @@ The server URL is already filled in. If it's empty, ask your faction's notes adm
 
 Set up the server once by following [server/SETUP.md](server/SETUP.md) (Cloudflare free plan, about 15 minutes).
 
-### No server?
+### No server, no key, or not in the faction?
 
-Everything still works without one. The Faction Armory then uses local notes, as in version 1.
+Everything still works. The Faction Armory then uses your private notes, as in version 1. If sign-in fails because the key is wrong or you're not in the faction, the script remembers that and stops trying until you change Settings.
 
 ## Editing a note
 
@@ -88,6 +88,7 @@ That is about **1 Torn API call per 12 hours**, and about **1.3 server requests 
 
 ## Changelog
 
+- **2.0.2**: Fixes: saving a faction note no longer hides another editor's change made moments earlier; without a key, or outside the faction, the Faction Armory falls back to private notes instead of showing nothing; clearing the cache during a refresh no longer loses notes; an upload that fails partway reports what was moved; uploads are split by size; refreshes only redraw notes that changed. The server rejects oversized requests before reading them.
 - **2.0.1**: Editors can edit or delete faction notes from the Items page by clicking the faction pill (for items in your own inventory). The faction's server URL is now built in.
 - **2.0.0**: Shared faction notes. Faction Armory notes are stored on a faction-run Cloudflare server and refresh every 45 s while visible, with editors-only editing and "last edited by". Adds the Settings panel (server URL + Public key), uploading (moving) local notes to the faction, and read-only faction pills on the Items page. Menu commands for local notes are renamed "local".
 - **1.0.0**: Initial release. Labels and notes per armory ID on the Items page (rows and thumbnails) and Faction Armory, with JSON export, import (merge or replace) and clear all.
