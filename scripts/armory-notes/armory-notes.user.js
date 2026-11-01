@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Armory Notes
 // @namespace    dadgum.torn.armorynotes
-// @version      2.0.0
+// @version      2.0.1
 // @description  Colored labels and notes on individual weapons and armor (keyed by armory ID). Private notes on the Items page; shared faction notes in the Faction Armory.
 // @author       DadGum
 // @license      MIT
@@ -44,6 +44,9 @@
  * Author: DadGum
  *
  * Changelog
+ *   2.0.1 (2026-11-01) Editors can edit faction notes from the Items page
+ *                      (click the faction pill), for items not in the
+ *                      faction armory. Default server URL set.
  *   2.0.0 (2026-11-01) Shared faction notes: Faction Armory notes live on the
  *                      faction's server, refresh every 45 s while visible,
  *                      editors-only editing with "last edited by". Settings
@@ -132,7 +135,7 @@
          * sharing the script so members only have to enter their key. Leave
          * empty to start with sharing off; members can still set it in Settings.
          */
-        DEFAULT_SERVER_URL: '',
+        DEFAULT_SERVER_URL: 'https://torn-armory-notes.dbeanwomble.workers.dev',
         SETTINGS_KEY: 'tms-armorynotes:settings:v1',
         SESSION_KEY: 'tms-armorynotes:session:v1',
         SHARED_CACHE_KEY: 'tms-armorynotes:shared:v1',
@@ -1496,7 +1499,7 @@
 .${CLS.factionHostNote}{padding-right:${CONFIG.FACTION_PAD_NOTE_PX}px !important;}
 .${CLS.kindFaction}{position:absolute;right:2px;top:50%;transform:translateY(-50%);
   max-width:${CONFIG.FACTION_PILL_MAX_PX}px;}
-.${CLS.kindShared}{margin-left:4px;max-width:${CONFIG.ITEMS_PILL_MAX_PX}px;box-shadow:inset 0 0 0 1px rgba(255,255,255,.55);cursor:help;}
+.${CLS.kindShared}{margin-left:4px;max-width:${CONFIG.ITEMS_PILL_MAX_PX}px;box-shadow:inset 0 0 0 1px rgba(255,255,255,.55);}
 .${CLS.btnReadOnly}{cursor:help;}
 .${CLS.btnHidden}{display:none !important;}
 ${colorRules}
@@ -1744,7 +1747,7 @@ ${colorRules}
             const id = btn.dataset[DATA_ID];
             const src = sourceOf(btn);
             const note = src.get(id);
-            const editable = src.canEdit() && btn.dataset[DATA_KIND] !== 'shared';
+            const editable = src.canEdit();
             const tip = el('div', { cls: CLS.tip, attrs: { role: 'tooltip' } });
             if (note) {
                 if (note.label) {
@@ -1879,8 +1882,8 @@ ${colorRules}
         btn.addEventListener('click', (e) => {
             e.preventDefault();
             e.stopPropagation();
-            // Read-only: faction pills on the Items page, or a viewer in the armory.
-            if (btn.dataset[DATA_KIND] === 'shared' || !sourceOf(btn).canEdit()) return;
+            // Read-only for faction viewers (editor rights are checked again by the server).
+            if (!sourceOf(btn).canEdit()) return;
             Tooltip.hide();
             try {
                 Editor.open(btn);
@@ -1906,7 +1909,8 @@ ${colorRules}
     /**
      * Render a note button from its source's current note.
      * Hidden when there is nothing to show and the user cannot add a note
-     * (faction viewers, and the read-only faction pill on the Items page).
+     * (faction viewers). The Items-page faction pill never offers "add": new
+     * faction notes are created in the armory, so nothing is shared by accident.
      * @param {HTMLButtonElement} btn - Button with data-tms-an-id and -src set.
      * @returns {void}
      */
@@ -1914,8 +1918,8 @@ ${colorRules}
         const kind = btn.dataset[DATA_KIND];
         const src = sourceOf(btn);
         const note = src.get(btn.dataset[DATA_ID]);
-        const editable = src.canEdit() && kind !== 'shared';
-        const hidden = !note && !editable;
+        const editable = src.canEdit();
+        const hidden = !note && (!editable || kind === 'shared');
         const name = btn.dataset[DATA_NAME] || 'item';
 
         btn.className = [
@@ -2548,7 +2552,7 @@ ${colorRules}
                 },
             },
             {
-                // Read-only faction note, shown only when one exists.
+                // Faction note, shown only when one exists (editable by editors).
                 kind: 'shared',
                 source: () => 'shared',
                 findHost: (row) => row.querySelector(CONFIG.SEL.ITEMS_NAME_WRAP),

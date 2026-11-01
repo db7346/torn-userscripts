@@ -13,7 +13,7 @@ Attach a colored label and a note to individual weapons and armor. Notes are tie
 - Click it to add a short label (up to 16 characters), pick one of 8 colors, and write a note (up to 1,000 characters)
 - The label shows as a colored pill; hover it to read the full note
 - **Faction Armory:** shared faction notes, refreshed every 45 seconds while the tab is visible. Hover shows who edited a note last and when.
-- **Items page:** your private notes (row and thumbnail views), plus a read-only faction pill (with a people icon) when an item has a faction note
+- **Items page:** your private notes (row and thumbnail views), plus a faction pill (with a people icon) when an item has a faction note. Editors can click it to edit or delete the faction note, which is handy for items in your own inventory; everyone else sees it read-only.
 - Upload your existing local notes to the faction in one step
 - Label autocomplete, plus backup and restore of local notes
 
@@ -25,7 +25,7 @@ Attach a colored label and a note to individual weapons and armor. Notes are tie
 2. Open your Faction Armory. A Settings dialog appears the first time.
 3. Enter a **Public** API key ([create one](https://www.torn.com/preferences.php#tab=api), "Public Only" access) and click **Save & sign in**.
 
-If the server URL field is empty, ask your faction's notes admin for it.
+The server URL is already filled in. If it's empty, ask your faction's notes admin for it.
 
 ### Faction notes admin
 
@@ -41,6 +41,7 @@ Everything still works without one. The Faction Armory then uses local notes, as
 - **Enter** in the label field or **Ctrl+Enter** anywhere saves. **Esc** cancels.
 - Clear both the label and the note, or click **Delete**, to remove it.
 - In the Faction Armory, only editors see the tag on items without a note. Everyone else sees existing notes read-only.
+- On the Items page, editors can edit or delete an existing faction note by clicking its pill. New faction notes are added in the Faction Armory (or with **Upload local notes to faction**), so nothing is shared by accident.
 
 ## Tampermonkey menu
 
@@ -78,7 +79,7 @@ That is about **1 Torn API call per 12 hours**, and about **1.3 server requests 
 
 ## Known limitations
 
-- Faction notes cover the Faction Armory only. On the Items page they show read-only in row view; they're not shown in thumbnail view.
+- On the Items page, faction notes show in row view only, not thumbnail view.
 - Edits are last-write-wins. If two editors change the same note at once, the later save wins; both changes are in the server's history.
 - Local notes are per browser. Use Export/Import to move them.
 - In the Faction Armory, a long item name truncates to make room for the label pill.
@@ -87,5 +88,6 @@ That is about **1 Torn API call per 12 hours**, and about **1.3 server requests 
 
 ## Changelog
 
+- **2.0.1**: Editors can edit or delete faction notes from the Items page by clicking the faction pill (for items in your own inventory). The faction's server URL is now built in.
 - **2.0.0**: Shared faction notes. Faction Armory notes are stored on a faction-run Cloudflare server and refresh every 45 s while visible, with editors-only editing and "last edited by". Adds the Settings panel (server URL + Public key), uploading (moving) local notes to the faction, and read-only faction pills on the Items page. Menu commands for local notes are renamed "local".
 - **1.0.0**: Initial release. Labels and notes per armory ID on the Items page (rows and thumbnails) and Faction Armory, with JSON export, import (merge or replace) and clear all.
