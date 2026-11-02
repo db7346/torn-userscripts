@@ -53,6 +53,7 @@ Everything still works. The Faction Armory then uses your private notes, as in v
 | Refresh faction notes | Fetch the latest faction notes now |
 | Upload local notes to faction | Editors only. Pick local notes to move to the faction. Items seen in the faction armory are pre-ticked. Uploaded notes are removed locally, and items that already have a faction note are skipped. |
 | Trade log (editors) | Recent trades logged with **Log This As Traded**, with Remove buttons for mistakes |
+| Sync armory now (editors) | Ask the server to read the whole faction armory now (it also does so every 6 hours, once set up) |
 | Clear faction notes cache | Forget cached faction notes and sign in again |
 | Export local notes (backup) | Downloads `torn-armory-notes-YYYY-MM-DD.json` |
 | Import local notes (restore) | Pick a backup, then **Merge** (newer note wins per item) or **Replace all** |
@@ -93,6 +94,7 @@ That is about **1 Torn API call per 12 hours**, and about **1.3 server requests 
 
 ## Changelog
 
+- **2.6.0**: Armory sync: the faction's server can read the whole armory from the Torn API every 6 hours (notes admin's own Limited key, see SETUP.md), giving exact **Status** (In armory / Traded to X / Missing since …) and **Loaned to**. Weapons and armor are separate tabs on the view page and separate exports (`&type=weapons` / `&type=armor`). New menu item **Sync armory now (editors)**. Needs migration `0005_armory_sync.sql`.
 - **Server update (no script change)**: shareable read-only web page at `/view?key=…` (needs the `VIEW_TOKEN` secret, see SETUP.md), with search, filters, sorting and click-to-show editor history.
 - **2.5.0**: Editors get a **Log This As Traded** checkbox on trades, which logs the trade's bonus armory items for the spreadsheet ("Traded to …"); untick to undo. Tampermonkey menu **Trade log (editors)** lists logged trades with Remove buttons. Sheet: new Source column (Armory / Not in armory) and Last trade columns in place of Last seen; only bonus items are listed. Needs migration `0004_trade_log.sql`.
 - **2.4.0**: Editors' browsers record every weapon and armor piece with a bonus seen in the Faction Armory (name, stats, bonuses, last seen) for the faction's spreadsheet, with a blank label until someone adds a note. Nothing changes in game. Needs migration `0003_tracked_items.sql`.

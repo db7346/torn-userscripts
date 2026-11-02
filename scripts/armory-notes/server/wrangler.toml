@@ -25,3 +25,7 @@ database_id = "300e25e1-d15c-4f5d-afe3-79ea37d76985"
 
 [observability]
 enabled = true
+
+# Armory sync every 6 hours (only runs when the ARMORY_API_KEY secret is set).
+[triggers]
+crons = ["23 */6 * * *"]

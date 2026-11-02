@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Armory Notes
 // @namespace    dadgum.torn.armorynotes
-// @version      2.5.0
+// @version      2.6.0
 // @description  Colored labels and notes on individual weapons and armor (keyed by armory ID). Private notes on the Items page; shared faction notes in the Faction Armory.
 // @author       DadGum
 // @license      MIT
@@ -48,6 +48,10 @@
  * Author: DadGum
  *
  * Changelog
+ *   2.6.0 (2026-11-01) "Sync armory now (editors)" menu item: the faction's
+ *                      server reads the whole armory from the Torn API
+ *                      (normally every 6 hours) for the spreadsheet and view
+ *                      page: status, missing items, loans. Disclosure updated.
  *   2.5.0 (2026-11-01) Editors get a "Log This As Traded" checkbox on the
  *                      trade view: logs the trade's bonus armory items for
  *                      the spreadsheet ("Traded to …"); untick to undo.
@@ -96,8 +100,16 @@
  *       In this browser (Tampermonkey storage): your local notes, your API
  *       key, the server URL, a sign-in token, and a cache of faction notes.
  *       On your faction's notes server (Cloudflare D1): faction notes and,
- *       for each change, the editor's Torn player ID and name. Your API key
- *       is NOT stored on the server.
+ *       for each change, the editor's Torn player ID and name; the faction
+ *       armory's bonus weapons/armor (stats, bonuses, who they are loaned
+ *       to) and trades logged by editors. Your API key is NOT stored on the
+ *       server.
+ *     Exception, notes admin only: the admin may store ONE Limited key of
+ *       their own as a server secret (ARMORY_API_KEY). The server uses it
+ *       every 6 hours to read the faction armory (faction/inventory, Limited,
+ *       needs faction API access) and item stats (torn/itemdetails), about
+ *       15 calls per sync, tagged comment=ArmoryNotes. Members' keys are
+ *       never stored.
  *   - Data sharing: faction notes are visible to members of your faction who
  *     use this script. Nothing is shared with anyone else.
  *   - Purpose of use: annotating your own and your faction's items.
@@ -107,7 +119,8 @@
  *     for one Torn API call (user basic,faction) to confirm who you are and
  *     that you are in the faction, then forgets it. The key is never logged
  *     and never put in a URL.
- *   - API calls: Torn API about 1 per 12 hours (sign-in, made by the server).
+ *   - API calls: Torn API about 1 per 12 hours per member (sign-in, made by
+ *     the server), plus the admin's armory sync (above).
  *     Faction server about 1.3 per minute while the Faction Armory is open
  *     and visible; none otherwise.
  *
@@ -3240,6 +3253,33 @@ ${colorRules}
     };
 
     /**
+     * Tampermonkey menu: ask the server to read the whole faction armory now
+     * (it also does this every 6 hours). Editors only; 5-minute cooldown.
+     * @returns {Promise<void>}
+     */
+    async function syncArmoryNow() {
+        if (!Shared.isActive()) {
+            openSettingsDialog('Set up faction sharing first.');
+            return;
+        }
+        if (!Shared.canEdit()) {
+            Notice.show('Only faction note editors can sync the armory.');
+            return;
+        }
+        Notice.show('Syncing the faction armory… this takes a few seconds.');
+        try {
+            const r = await Server.request('POST', '/armory/sync');
+            const parts = [`Armory synced: ${r.inArmory ?? '?'} items in the armory`];
+            if (r.newBonusItems) parts.push(`${r.newBonusItems} new bonus item${r.newBonusItems === 1 ? '' : 's'}`);
+            if (r.markedMissing) parts.push(`${r.markedMissing} no longer in the armory`);
+            if (r.remainingToLookUp) parts.push(`${r.remainingToLookUp} more to look up next sync`);
+            Notice.show(`${parts.join(', ')}. The spreadsheet updates within an hour; the view page right away.`);
+        } catch (err) {
+            handleSharedError('Armory sync', err);
+        }
+    }
+
+    /**
      * Tampermonkey menu: list recent logged trades with Remove buttons (editors).
      * @returns {Promise<void>}
      */
@@ -3912,6 +3952,9 @@ ${colorRules}
         }));
         GM_registerMenuCommand('Trade log (editors)', guard('Trade log', () => {
             openTradeLogDialog().catch((err) => reportError('Trade log', err));
+        }));
+        GM_registerMenuCommand('Sync armory now (editors)', guard('Armory sync', () => {
+            syncArmoryNow().catch((err) => reportError('Armory sync', err));
         }));
         GM_registerMenuCommand('Clear faction notes cache', guard('Clear cache', () => {
             SharedStore.clear();

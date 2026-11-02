@@ -20,6 +20,7 @@ import { viewHtml } from './view.mjs';
  *                                fingerprint, itemName, direction: 'out'|'in' }] }
  *                                (replaces earlier log; fingerprints are matched here)
  *   DELETE /trades/:tradeId[/:armoryId]  editors: remove a trade's log (or one item)
+ *   POST   /armory/sync          editors: run the armory sync now (5-minute cooldown)
  *   GET    /view?key=            read-only web page of the same list (needs the VIEW_TOKEN
  *                                secret; off when it is not set)
  *   GET    /export.csv?token=    bonus items + notes as CSV for a spreadsheet (needs the
@@ -40,6 +41,10 @@ import { viewHtml } from './view.mjs';
  *   TOKEN_SECRET (secret)  random string for signing tokens
  *   EXPORT_TOKEN (secret)  optional: enables /export.csv for anyone with the link
  *   VIEW_TOKEN   (secret)  optional: enables /view for anyone with the link
+ *   ARMORY_API_KEY (secret) optional: the notes admin's own Limited Torn API key
+ *                          (needs faction API access). Every 6 hours (cron) the
+ *                          Worker reads the whole faction armory with it:
+ *                          faction/inventory (Limited) + torn/itemdetails (Public).
  *   DB           (D1 binding, see wrangler.toml)
  */
 
@@ -70,6 +75,18 @@ const CONFIG = Object.freeze({
     TRADE_ID_PATTERN: /^\d{1,20}$/,
     PLAYER_NAME_PATTERN: /^[A-Za-z0-9_-]{1,32}$/,
     TRADE_LIST_MAX: 200,
+    /** Armory sync (Torn API v2, called by the Worker with ARMORY_API_KEY). */
+    TORN_V2: 'https://api.torn.com/v2',
+    SYNC_INVENTORY_LIMIT: 100,
+    SYNC_INVENTORY_MAX_PAGES: 5,
+    SYNC_DETAILS_PER_CALL: 25,
+    /** New items whose stats are looked up per sync (stats never change, so known items are skipped). */
+    SYNC_DETAILS_MAX_CALLS: 35,
+    SYNC_COOLDOWN_MS: 5 * 60 * 1000,
+    /** A trade logged up to this long before an item disappeared counts as the reason it left. */
+    TRADE_GRACE_MS: 7 * 24 * 60 * 60 * 1000,
+    /** Without the sync: an item counts as missing once other items of its type were seen this much later. */
+    HEURISTIC_MISSING_MS: 36 * 60 * 60 * 1000,
     CATEGORIES: Object.freeze(['Primary', 'Secondary', 'Melee', 'Defensive']),
     API_KEY_PATTERN: /^[A-Za-z0-9]{16}$/,
 });
@@ -627,30 +644,42 @@ async function handleItemsSeen(request, cfg) {
     if (list.length > CONFIG.MAX_SEEN) throw new HttpError(413, 'too_many', `At most ${CONFIG.MAX_SEEN} items per request.`);
 
     const now = Date.now();
-    const stmts = [];
+    const rows = [];
     const seen = new Set();
     for (const raw of list) {
         const id = String(raw?.armoryId ?? '');
         const bonuses = cleanBonuses(raw?.bonuses);
         if (!CONFIG.ARMORY_ID_PATTERN.test(id) || !bonuses || seen.has(id)) continue; // bonus items only
         seen.add(id);
-        const category = CONFIG.CATEGORIES.includes(raw?.category) ? raw.category : '';
-        const itemId = /^\d{1,10}$/.test(String(raw?.itemId ?? '')) ? String(raw.itemId) : '';
-        stmts.push(cfg.db.prepare(
+        rows.push({
+            u: id,
+            n: String(raw?.itemName ?? '').slice(0, CONFIG.NAME_MAX),
+            i: /^\d{1,10}$/.test(String(raw?.itemId ?? '')) ? String(raw.itemId) : '',
+            c: CONFIG.CATEGORIES.includes(raw?.category) ? raw.category : '',
+            f: cleanFingerprint(raw?.fingerprint),
+            b: bonuses,
+        });
+    }
+    // One statement for all rows (D1's free plan limits queries per request).
+    if (rows.length) {
+        await cfg.db.prepare(
             `INSERT INTO tracked_items (armory_id, item_name, item_id, category, fingerprint, bonuses,
-                                        first_seen, last_seen, seen_by_id, seen_by_name)
-             VALUES (?1, ?2, ?3, ?4, COALESCE(?5, ''), ?6, ?7, ?7, ?8, ?9)
+                                        first_seen, last_seen, seen_by_id, seen_by_name, in_armory, missing_since)
+             SELECT json_extract(value, '$.u'), json_extract(value, '$.n'), json_extract(value, '$.i'),
+                    json_extract(value, '$.c'), COALESCE(json_extract(value, '$.f'), ''), json_extract(value, '$.b'),
+                    ?2, ?2, ?3, ?4, 1, NULL
+             FROM json_each(?1) WHERE true
              ON CONFLICT(armory_id) DO UPDATE SET
                item_name = CASE WHEN excluded.item_name <> '' THEN excluded.item_name ELSE tracked_items.item_name END,
                item_id = CASE WHEN excluded.item_id <> '' THEN excluded.item_id ELSE tracked_items.item_id END,
                category = CASE WHEN excluded.category <> '' THEN excluded.category ELSE tracked_items.category END,
-               fingerprint = COALESCE(?5, tracked_items.fingerprint), bonuses = excluded.bonuses,
-               last_seen = excluded.last_seen, seen_by_id = excluded.seen_by_id, seen_by_name = excluded.seen_by_name`,
-        ).bind(id, String(raw?.itemName ?? '').slice(0, CONFIG.NAME_MAX), itemId, category,
-            cleanFingerprint(raw?.fingerprint), bonuses, now, user.pid, user.name));
+               fingerprint = CASE WHEN excluded.fingerprint <> '' THEN excluded.fingerprint ELSE tracked_items.fingerprint END,
+               bonuses = excluded.bonuses, last_seen = excluded.last_seen,
+               seen_by_id = excluded.seen_by_id, seen_by_name = excluded.seen_by_name,
+               in_armory = 1, missing_since = NULL`,
+        ).bind(JSON.stringify(rows), now, user.pid, user.name).run();
     }
-    for (let i = 0; i < stmts.length; i += 100) await cfg.db.batch(stmts.slice(i, i + 100));
-    return json(request, 200, { recorded: stmts.length });
+    return json(request, 200, { recorded: rows.length });
 }
 
 /* ===========================================================================
@@ -872,14 +901,33 @@ function statsFromFingerprint(fp) {
 }
 
 /**
- * One row per weapon/armor with a bonus: armory items (seen by an editor's
- * browser) first, then bonus items with a faction note that were never seen in
- * the armory. Shared by the CSV export and the view page.
+ * "weapons" or "armor" for a row.
+ * @param {string} category - Torn category (Primary/Secondary/Melee/Defensive) or ''.
+ * @param {string} fp - Fingerprint ("a|…" = armor).
+ * @returns {'weapons'|'armor'} Type.
+ */
+function itemType(category, fp) {
+    if (category === 'Defensive') return 'armor';
+    if (category) return 'weapons';
+    return String(fp ?? '').startsWith('a|') ? 'armor' : 'weapons';
+}
+
+/**
+ * One row per weapon/armor with a bonus: armory items first, then bonus items
+ * with a faction note that were never seen in the armory. Shared by the CSV
+ * export and the view page.
+ *
+ * Status:
+ *  - "In armory"            in the armory at the last sync (or seen recently)
+ *  - "Traded to X"          gone from the armory, and an editor logged a trade for it
+ *  - "Missing since <date>" gone from the armory with no logged trade
+ *  - "Not in armory"        a faction note on an item never seen in the armory
+ * With the armory sync this is exact. Without it, an item counts as gone once
+ * other items of its type were seen 36 hours after it.
  * @param {ReturnType<typeof settings>} cfg - Settings.
  * @returns {Promise<Object[]>} Rows (times are epoch ms or null; stats numbers or '').
  */
 async function sheetRows(cfg) {
-    // Live notes. Previous edit = the second-latest change in the history log.
     const { results: noteRows } = await cfg.db.prepare(
         `SELECT n.*,
            (SELECT by_name FROM note_log l WHERE l.armory_id = n.armory_id ORDER BY at DESC, id DESC LIMIT 1 OFFSET 1) AS prev_by,
@@ -887,13 +935,18 @@ async function sheetRows(cfg) {
          FROM notes n WHERE n.deleted = 0`,
     ).all();
     const { results: itemRows } = await cfg.db.prepare("SELECT * FROM tracked_items WHERE bonuses <> ''").all();
-    // Latest logged trade per item.
     const { results: tradeRows } = await cfg.db.prepare(
         `SELECT t.* FROM trade_log t
          WHERE t.id = (SELECT t2.id FROM trade_log t2 WHERE t2.armory_id = t.armory_id ORDER BY t2.logged_at DESC, t2.id DESC LIMIT 1)`,
     ).all();
     const lastTrade = new Map((tradeRows ?? []).map((t) => [t.armory_id, t]));
+    const syncActive = Boolean((await readSyncState(cfg.db)).last_ok);
 
+    const latestSeen = { weapons: 0, armor: 0 };
+    for (const t of itemRows ?? []) {
+        const ty = itemType(t.category, t.fingerprint);
+        latestSeen[ty] = Math.max(latestSeen[ty], t.last_seen ?? 0);
+    }
     const rows = new Map();
     for (const t of itemRows ?? []) rows.set(t.armory_id, { item: t, note: null });
     for (const n of noteRows ?? []) {
@@ -903,12 +956,38 @@ async function sheetRows(cfg) {
     const CATEGORY_NAMES = { Defensive: 'Armor' };
     return [...rows.entries()]
         .map(([id, { item, note }]) => {
-            const st = statsFromFingerprint(item?.fingerprint || note?.fingerprint || '');
+            const fp = item?.fingerprint || note?.fingerprint || '';
+            const st = statsFromFingerprint(fp);
             const trade = lastTrade.get(id);
+            const type = itemType(item?.category ?? '', fp);
+            let status = 'Not in armory';
+            let statusKind = 'out';
+            let missingSince = null;
+            if (item) {
+                let gone = item.in_armory === 0;
+                missingSince = gone ? (item.missing_since ?? item.last_seen) : null;
+                if (!syncActive && !gone && (item.last_seen ?? 0) < latestSeen[type] - CONFIG.HEURISTIC_MISSING_MS) {
+                    gone = true;
+                    missingSince = item.last_seen;
+                }
+                if (!gone) {
+                    status = 'In armory';
+                    statusKind = 'in';
+                } else if (trade && trade.logged_at >= (missingSince ?? 0) - CONFIG.TRADE_GRACE_MS) {
+                    status = `Traded to ${trade.to_name}`;
+                    statusKind = 'traded';
+                } else {
+                    status = `Missing since ${tct(missingSince).slice(0, 10)}`;
+                    statusKind = 'missing';
+                }
+            }
             return {
+                type,
                 item: item?.item_name || note?.item_name || '',
                 category: item?.category ? (CATEGORY_NAMES[item.category] ?? item.category) : '',
                 source: item ? 'Armory' : 'Not in armory',
+                status, statusKind, missingSince,
+                loanedTo: statusKind === 'in' ? (item?.loaned_to ?? '') : '',
                 label: note?.label ?? '', note: note?.text ?? '', color: note?.color ?? '',
                 armoryId: id, damage: st.damage, accuracy: st.accuracy, defence: st.defence,
                 bonuses: item?.bonuses || note?.bonuses || '',
@@ -936,16 +1015,26 @@ async function handleExport(request, url, env, cfg) {
     if (expected.length < CONFIG.EXPORT_TOKEN_MIN) throw new HttpError(404, 'not_found', 'Not found.');
     if (!safeEqual(url.searchParams.get('token') ?? '', expected)) throw new HttpError(403, 'bad_token', 'Invalid export token.');
 
-    const header = ['Item', 'Category', 'Source', 'Label', 'Note', 'Color', 'Armory ID', 'Damage', 'Accuracy', 'Defence', 'Bonuses',
-        'Last edited by', 'Last edited (TCT)', 'Previous edit by', 'Previous edit (TCT)',
-        'Last trade', 'Last trade (TCT)', 'Trade logged by'];
-    const lines = [header.map(csvCell).join(',')];
+    // ?type=weapons or ?type=armor gives one tab's rows and columns; no type = everything.
+    const type = ['weapons', 'armor'].includes(url.searchParams.get('type')) ? url.searchParams.get('type') : 'all';
+    const col = (title, get) => ({ title, get });
+    const head = [col('Item', (r) => r.item)];
+    if (type !== 'armor') head.push(col('Category', (r) => r.category));
+    head.push(col('Status', (r) => r.status), col('Loaned to', (r) => r.loanedTo), col('Label', (r) => r.label),
+        col('Note', (r) => r.note), col('Color', (r) => r.color), col('Armory ID', (r) => r.armoryId));
+    if (type !== 'armor') head.push(col('Damage', (r) => r.damage), col('Accuracy', (r) => r.accuracy));
+    if (type !== 'weapons') head.push(col('Defence', (r) => r.defence));
+    head.push(
+        col('Bonuses', (r) => r.bonuses),
+        col('Last edited by', (r) => r.lastEditedBy), col('Last edited (TCT)', (r) => tct(r.lastEdited)),
+        col('Previous edit by', (r) => r.prevBy), col('Previous edit (TCT)', (r) => tct(r.prevAt)),
+        col('Last trade', (r) => (r.tradedTo ? `Traded to ${r.tradedTo}` : '')), col('Last trade (TCT)', (r) => tct(r.tradeAt)),
+        col('Trade logged by', (r) => r.tradeLoggedBy),
+    );
+    const lines = [head.map((c) => csvCell(c.title)).join(',')];
     for (const r of await sheetRows(cfg)) {
-        lines.push([
-            r.item, r.category, r.source, r.label, r.note, r.color, r.armoryId, r.damage, r.accuracy, r.defence, r.bonuses,
-            r.lastEditedBy, tct(r.lastEdited), r.prevBy, tct(r.prevAt),
-            r.tradedTo ? `Traded to ${r.tradedTo}` : '', tct(r.tradeAt), r.tradeLoggedBy,
-        ].map(csvCell).join(','));
+        if (type !== 'all' && r.type !== type) continue;
+        lines.push(head.map((c) => csvCell(c.get(r))).join(','));
     }
     return new Response(`${lines.join('\r\n')}\r\n`, {
         status: 200,
@@ -975,7 +1064,9 @@ async function handleView(request, url, env, cfg) {
     if (expected.length < CONFIG.EXPORT_TOKEN_MIN) return plain(404, 'Not found.');
     if (!safeEqual(url.searchParams.get('key') ?? '', expected)) return plain(403, 'This link is not valid. Ask your faction for the current one.');
     const nonce = crypto.randomUUID().replace(/-/g, '');
-    return new Response(viewHtml(await sheetRows(cfg), nonce, Date.now()), {
+    const sync = await readSyncState(cfg.db);
+    const syncInfo = { configured: Boolean(env.ARMORY_API_KEY), lastOk: Number(sync.last_ok) || null, lastError: sync.last_error_at > (sync.last_ok || 0) ? sync.last_error ?? '' : '' };
+    return new Response(viewHtml(await sheetRows(cfg), nonce, Date.now(), syncInfo), {
         status: 200,
         headers: {
             'Content-Type': 'text/html; charset=utf-8',
@@ -988,6 +1079,197 @@ async function handleView(request, url, env, cfg) {
                 + "img-src 'none'; connect-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         },
     });
+}
+
+/* ===========================================================================
+ * Armory sync (whole faction armory from the Torn API, every 6 hours)
+ * ======================================================================== */
+
+/**
+ * Read the sync bookkeeping (last_run, last_ok, last_error, last_error_at, summary).
+ * @param {any} db - D1 binding.
+ * @returns {Promise<Object<string, *>>} Values (numbers where numeric).
+ */
+async function readSyncState(db) {
+    const { results } = await db.prepare('SELECT k, v FROM sync_state').all();
+    const out = {};
+    for (const r of results ?? []) out[r.k] = /^\d+$/.test(r.v) ? Number(r.v) : r.v;
+    return out;
+}
+
+/**
+ * Write sync bookkeeping values in one statement.
+ * @param {any} db - D1 binding.
+ * @param {Object<string, (string|number)>} values - Keys and values.
+ * @returns {Promise<void>}
+ */
+async function writeSyncState(db, values) {
+    const rows = Object.entries(values).map(([k, v]) => ({ k, v: String(v) }));
+    await db.prepare(
+        `INSERT INTO sync_state (k, v) SELECT json_extract(value, '$.k'), json_extract(value, '$.v') FROM json_each(?1) WHERE true
+         ON CONFLICT(k) DO UPDATE SET v = excluded.v`,
+    ).bind(JSON.stringify(rows)).run();
+}
+
+/**
+ * GET a Torn API v2 path with the armory key (header auth, never in the URL).
+ * @param {string} path - Path and query, starting with "/".
+ * @param {string} key - Limited API key.
+ * @returns {Promise<any>} JSON.
+ * @throws {Error} With Torn's error code and message.
+ */
+async function tornGet(path, key) {
+    const sep = path.includes('?') ? '&' : '?';
+    let data;
+    try {
+        const res = await fetch(`${CONFIG.TORN_V2}${path}${sep}comment=ArmoryNotes`, { headers: { Authorization: `ApiKey ${key}` } });
+        data = await res.json();
+    } catch {
+        throw new Error('Could not reach the Torn API.');
+    }
+    if (data?.error) throw new Error(`Torn API error ${data.error.code}: ${data.error.error}`);
+    return data;
+}
+
+/**
+ * Fingerprint from API item details; must match the script's makeFingerprint().
+ * @param {string} name - Item name.
+ * @param {{damage: ?number, accuracy: ?number, armor: ?number}|null} stats - Stats.
+ * @param {{title: string, value: number}[]} bonuses - Bonuses.
+ * @returns {string|null} Fingerprint, or null if stats are missing.
+ */
+function apiFingerprint(name, stats, bonuses) {
+    const n = String(name ?? '').trim().replace(/\s+/g, ' ').toLowerCase().replace(/\|/g, '/');
+    const fix = (v) => (typeof v === 'number' && Number.isFinite(v) ? v.toFixed(2) : null);
+    let fp = null;
+    if (n && fix(stats?.damage) && fix(stats?.accuracy)) {
+        fp = `w|${n}|${fix(stats.damage)}|${fix(stats.accuracy)}`;
+    } else if (n && fix(stats?.armor)) {
+        const b = (bonuses ?? []).map((x) => `${String(x.title).toLowerCase().replace(/[|,:]/g, '')}:${x.value}`).sort().join(',');
+        fp = `a|${n}|${fix(stats.armor)}|${b}`;
+    }
+    return cleanFingerprint(fp);
+}
+
+/**
+ * Read the whole faction armory (weapons + armor) and update tracked_items:
+ * new items get their stats looked up (stats never change, so known items are
+ * skipped), every present item is marked "in armory" with its loan, and items
+ * no longer in the armory get "missing since". Uses a handful of D1 queries
+ * regardless of armory size.
+ * @param {Object} env - Worker env (needs ARMORY_API_KEY).
+ * @returns {Promise<Object>} Summary.
+ */
+async function runArmorySync(env) {
+    const cfg = settings(env);
+    const key = String(env.ARMORY_API_KEY ?? '').trim();
+    if (!/^[A-Za-z0-9]{16}$/.test(key)) return { ok: false, error: 'ARMORY_API_KEY is not set (or is not a 16-character key).' };
+    const now = Date.now();
+    await writeSyncState(cfg.db, { last_run: now });
+    try {
+        /** @type {Map<string, {name: string, itemId: string, type: string, loaned: ({id: number, name: string}|null)}>} */
+        const present = new Map();
+        for (const cat of ['weapons', 'armor']) {
+            for (let page = 0, offset = 0; page < CONFIG.SYNC_INVENTORY_MAX_PAGES; page += 1, offset += CONFIG.SYNC_INVENTORY_LIMIT) {
+                const data = await tornGet(`/faction/inventory?cat=${cat}&limit=${CONFIG.SYNC_INVENTORY_LIMIT}&offset=${offset}`, key);
+                const list = Array.isArray(data?.inventory) ? data.inventory : [];
+                for (const e of list) {
+                    for (const uid of Array.isArray(e?.uids) ? e.uids : []) {
+                        present.set(String(uid), {
+                            name: String(e.name ?? '').slice(0, CONFIG.NAME_MAX),
+                            itemId: String(e.id ?? ''),
+                            type: CONFIG.CATEGORIES.includes(e.type) ? e.type : (cat === 'armor' ? 'Defensive' : ''),
+                            loaned: e.loaned && typeof e.loaned === 'object' ? { id: Number(e.loaned.id) || 0, name: String(e.loaned.name ?? '') } : null,
+                        });
+                    }
+                }
+                if (list.length < CONFIG.SYNC_INVENTORY_LIMIT) break;
+            }
+        }
+        const uids = [...present.keys()].filter((u) => CONFIG.ARMORY_ID_PATTERN.test(u));
+        if (!uids.length) throw new Error('The faction armory came back empty; nothing was changed.');
+
+        // Look up stats only for items not tracked yet.
+        const { results: known } = await cfg.db.prepare(
+            'SELECT armory_id FROM tracked_items WHERE armory_id IN (SELECT value FROM json_each(?1))',
+        ).bind(JSON.stringify(uids)).all();
+        const knownSet = new Set((known ?? []).map((r) => r.armory_id));
+        const fresh = uids.filter((u) => !knownSet.has(u)).slice(0, CONFIG.SYNC_DETAILS_PER_CALL * CONFIG.SYNC_DETAILS_MAX_CALLS);
+        const newRows = [];
+        for (let i = 0; i < fresh.length; i += CONFIG.SYNC_DETAILS_PER_CALL) {
+            const data = await tornGet(`/torn/${fresh.slice(i, i + CONFIG.SYNC_DETAILS_PER_CALL).join(',')}/itemdetails`, key);
+            let list = data?.itemdetails;
+            if (!Array.isArray(list)) list = list && typeof list === 'object' ? [list] : [];
+            for (const d of list) {
+                const uid = String(d?.uid ?? '');
+                const inv = present.get(uid);
+                if (!inv) continue;
+                const bonuses = Array.isArray(d.bonuses) ? d.bonuses : [];
+                newRows.push({
+                    u: uid, n: inv.name || String(d.name ?? ''), i: inv.itemId, c: inv.type,
+                    f: apiFingerprint(inv.name || d.name, d.stats, bonuses) ?? '',
+                    // Items without a bonus are remembered (so they are not looked up again) but never listed.
+                    b: bonuses.map((x) => `${x.value}% ${x.title}`).join(', ').slice(0, CONFIG.BONUSES_MAX),
+                    l: inv.loaned?.name ?? '', li: inv.loaned?.id ?? 0,
+                });
+            }
+        }
+        if (newRows.length) {
+            await cfg.db.prepare(
+                `INSERT INTO tracked_items (armory_id, item_name, item_id, category, fingerprint, bonuses, first_seen, last_seen,
+                                            seen_by_id, seen_by_name, in_armory, missing_since, loaned_to, loaned_to_id)
+                 SELECT json_extract(value, '$.u'), json_extract(value, '$.n'), json_extract(value, '$.i'), json_extract(value, '$.c'),
+                        json_extract(value, '$.f'), json_extract(value, '$.b'), ?2, ?2, 0, 'Armory sync', 1, NULL,
+                        json_extract(value, '$.l'), json_extract(value, '$.li')
+                 FROM json_each(?1) WHERE true
+                 ON CONFLICT(armory_id) DO NOTHING`,
+            ).bind(JSON.stringify(newRows), now).run();
+        }
+        // Everything present: in the armory, with its current loan.
+        const presentRows = uids.map((u) => ({ u, l: present.get(u).loaned?.name ?? '', li: present.get(u).loaned?.id ?? 0, c: present.get(u).type }));
+        await cfg.db.prepare(
+            `UPDATE tracked_items SET in_armory = 1, missing_since = NULL, last_seen = ?2,
+                    loaned_to = json_extract(j.value, '$.l'), loaned_to_id = json_extract(j.value, '$.li'),
+                    category = CASE WHEN category = '' THEN json_extract(j.value, '$.c') ELSE category END
+             FROM json_each(?1) AS j WHERE tracked_items.armory_id = json_extract(j.value, '$.u')`,
+        ).bind(JSON.stringify(presentRows), now).run();
+        // Everything else that was in the armory: gone since now.
+        const gone = await cfg.db.prepare(
+            `UPDATE tracked_items SET in_armory = 0, missing_since = COALESCE(missing_since, ?2), loaned_to = '', loaned_to_id = 0
+             WHERE in_armory = 1 AND armory_id NOT IN (SELECT value FROM json_each(?1))`,
+        ).bind(JSON.stringify(uids), now).run();
+        const summary = {
+            ok: true, at: now, inArmory: uids.length, newlyLookedUp: newRows.length,
+            newBonusItems: newRows.filter((r) => r.b).length, markedMissing: gone?.meta?.changes ?? null,
+            remainingToLookUp: Math.max(0, uids.filter((u) => !knownSet.has(u)).length - fresh.length),
+        };
+        await writeSyncState(cfg.db, { last_ok: now, summary: JSON.stringify(summary) });
+        return summary;
+    } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        await writeSyncState(cfg.db, { last_error: message, last_error_at: Date.now() });
+        console.error('Armory sync failed:', message); // never logs the key
+        return { ok: false, error: message };
+    }
+}
+
+/**
+ * POST /armory/sync - run the sync now (editors; at most every 5 minutes).
+ * @param {Request} request - Request.
+ * @param {Object} env - Worker env.
+ * @param {ReturnType<typeof settings>} cfg - Settings.
+ * @returns {Promise<Response>} Summary.
+ */
+async function handleSyncNow(request, env, cfg) {
+    const user = await requireUser(request, cfg);
+    requireEditor(user, cfg);
+    if (!env.ARMORY_API_KEY) throw new HttpError(400, 'sync_off', 'Armory sync is not set up (ARMORY_API_KEY secret missing).');
+    const st = await readSyncState(cfg.db);
+    const wait = (Number(st.last_run) || 0) + CONFIG.SYNC_COOLDOWN_MS - Date.now();
+    if (wait > 0) throw new HttpError(429, 'sync_cooldown', `Synced recently. Try again in ${Math.ceil(wait / 60000)} min.`);
+    const result = await runArmorySync(env);
+    if (!result.ok) throw new HttpError(502, 'sync_failed', result.error);
+    return json(request, 200, result);
 }
 
 /* ===========================================================================
@@ -1026,6 +1308,7 @@ export default {
             if (t && request.method === 'DELETE') return await handleTradeDelete(request, t[1], t[2], cfg);
             if (path === '/export.csv' && request.method === 'GET') return await handleExport(request, url, env, cfg);
             if (path === '/view' && request.method === 'GET') return await handleView(request, url, env, cfg);
+            if (path === '/armory/sync' && request.method === 'POST') return await handleSyncNow(request, env, cfg);
             const m = path.match(/^\/notes\/([^/]+)$/);
             if (m && request.method === 'PUT') return await handlePut(request, m[1], cfg);
             if (m && request.method === 'DELETE') return await handleDelete(request, m[1], cfg);
@@ -1037,5 +1320,17 @@ export default {
             console.error('Unhandled error:', err?.message ?? err); // never logs keys or bodies
             return json(request, 500, { error: { code: 'server_error', message: 'Unexpected server error.' } });
         }
+    },
+
+    /**
+     * Cron trigger (wrangler.toml): sync the faction armory.
+     * @param {ScheduledController} event - Event.
+     * @param {Object} env - Bindings and variables.
+     * @param {ExecutionContext} ctx - Context.
+     * @returns {void}
+     */
+    scheduled(event, env, ctx) {
+        if (!env.ARMORY_API_KEY) return;
+        ctx.waitUntil(runArmorySync(env).catch((err) => console.error('Armory sync crashed:', err?.message ?? err)));
     },
 };

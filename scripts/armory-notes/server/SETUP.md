@@ -98,6 +98,7 @@ Some releases change the database. Run each new file in [`migrations/`](migratio
 | `0002_bonuses.sql` | 2.3.0 | Adds readable bonus text ("22% Execute") for the spreadsheet export |
 | `0003_tracked_items.sql` | 2.4.0 | Adds the list of bonus items seen in the faction armory, for the spreadsheet |
 | `0004_trade_log.sql` | 2.5.0 | Adds the trade log ("Log This As Traded") |
+| `0005_armory_sync.sql` | 2.6.0 | Adds armory status, "missing since", loans, and sync bookkeeping |
 
 New databases created from `schema.sql` already include every migration.
 
@@ -118,9 +119,14 @@ Google refreshes it about once an hour, and when the sheet is opened.
 
 The sheet lists every weapon and armor piece **with a bonus** that an editor's browser has seen in the Faction Armory (Source: **Armory**), then any bonus item that has a faction note but was never seen in the armory (Source: **Not in armory**). Items without a note have a blank label until someone adds one. Items without a bonus are never listed.
 
+For separate tabs, use `&type=weapons` and `&type=armor` on the export link (one `IMPORTDATA` per tab). Without `type`, everything is in one list.
+
 | Column | |
 |---|---|
-| Item, Category, Source, Label, Note, Color, Armory ID | The item, where it's known from, and its faction note if it has one |
+| Item, Category | The item (Category on the weapons/all export only) |
+| Status | **In armory**, **Traded to X** (gone, with a logged trade), **Missing since …** (gone, no logged trade), or **Not in armory** (a faction note on an item never seen in the armory) |
+| Loaned to | Who the item is loaned to (needs the armory sync) |
+| Label, Note, Color, Armory ID | The faction note, if any |
 | Damage, Accuracy / Defence, Bonuses | The item's stats, recorded automatically by editors' browsers |
 | Last edited by / (TCT) | Who changed the note last, and when (Torn City Time) |
 | Previous edit by / (TCT) | The change before that (blank if there was only one) |
@@ -133,6 +139,19 @@ Editors see a **Log This As Traded** checkbox in the "This trade expires…" bar
 To fix a mistake later, use **Tampermonkey menu > Trade log (editors)**: it lists recent logged trades with a **Remove** button per item and per trade. The sheet itself is read-only (Google re-imports it), so make corrections there, not in the sheet.
 
 **Keep the link private.** Anyone with it, or anyone who can see the formula in the sheet, can read every faction note. If it leaks, change `EXPORT_TOKEN`, click Deploy, and update the formula; the old link stops working immediately.
+
+## Armory sync (optional, recommended)
+
+Reads the **whole** faction armory from the Torn API every 6 hours, so the sheet and view page list every bonus weapon and armor piece (not only the pages an editor opened), with exact **Status** (In armory / Traded to X / Missing since …) and **Loaned to**.
+
+It needs **one Limited API key of the notes admin's own**, from a player with **faction API access** (set in your faction's settings). That key is stored on the server; members' keys never are.
+
+1. Create a key in Torn (Settings > API Keys) with **Limited** access. Name it "Armory Notes sync".
+2. In the Worker's **Settings > Runtime variables and secrets**, add a **Secret** named `ARMORY_API_KEY` with that key, then click **Deploy**.
+3. Because a dashboard change can bring back older code, open **Deployments** and use **Retry build** on the newest GitHub commit.
+4. In Torn, use **Tampermonkey menu > Sync armory now (editors)** for the first run. After that it runs every 6 hours by itself (`[triggers]` in `wrangler.toml`).
+
+Each sync makes about 2 to 4 inventory calls plus 1 call per 25 *new* items (stats never change, so known items are not looked up again), all tagged `comment=ArmoryNotes`. Torn errors (for example a missing faction API access) show on the view page and in the sync notice.
 
 ## Shareable web page (optional)
 

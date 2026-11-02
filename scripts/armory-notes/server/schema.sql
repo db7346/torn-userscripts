@@ -52,7 +52,11 @@ CREATE TABLE IF NOT EXISTS tracked_items (
     first_seen   INTEGER NOT NULL,                 -- epoch ms
     last_seen    INTEGER NOT NULL,                 -- epoch ms
     seen_by_id   INTEGER NOT NULL DEFAULT 0,
-    seen_by_name TEXT    NOT NULL DEFAULT ''
+    seen_by_name TEXT    NOT NULL DEFAULT '',
+    in_armory    INTEGER NOT NULL DEFAULT 1,       -- 0 once the armory sync no longer finds it
+    missing_since INTEGER,                          -- epoch ms it was first found gone
+    loaned_to    TEXT    NOT NULL DEFAULT '',      -- from the armory sync
+    loaned_to_id INTEGER NOT NULL DEFAULT 0
 );
 
 -- Trades logged by editors ("Log This As Traded" on the trade page).
@@ -71,3 +75,9 @@ CREATE TABLE IF NOT EXISTS trade_log (
 );
 CREATE INDEX IF NOT EXISTS idx_trade_log_item ON trade_log (armory_id, logged_at);
 CREATE INDEX IF NOT EXISTS idx_trade_log_at ON trade_log (logged_at);
+
+-- Armory sync bookkeeping (last_run, last_ok, last_error, last_error_at, summary).
+CREATE TABLE IF NOT EXISTS sync_state (
+    k TEXT PRIMARY KEY,
+    v TEXT NOT NULL DEFAULT ''
+);

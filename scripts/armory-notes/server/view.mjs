@@ -37,9 +37,10 @@ function safeJson(value) {
  * @param {Object[]} rows - Rows from sheetRows().
  * @param {string} nonce - CSP nonce for the inline script and style.
  * @param {number} generatedAt - Epoch ms.
+ * @param {{configured: boolean, lastOk: (number|null), lastError: string}} [sync] - Armory sync state.
  * @returns {string} HTML document.
  */
-export function viewHtml(rows, nonce, generatedAt) {
+export function viewHtml(rows, nonce, generatedAt, sync = { configured: false, lastOk: null, lastError: '' }) {
     const n = esc(nonce);
     return `<!doctype html>
 <html lang="en">
@@ -88,6 +89,16 @@ td.note{max-width:320px;white-space:pre-wrap;word-break:break-word}
 .c-green{background:#3fb950;color:#0d1117}.c-teal{background:#2aa198;color:#fff}.c-blue{background:#4493f8;color:#fff}
 .c-purple{background:#a371f7;color:#fff}.c-gray{background:#8b949e;color:#0d1117}
 .trade{color:var(--green2);font-weight:700;white-space:nowrap}
+.tabs{display:flex;gap:4px;padding:0 16px;background:var(--panel)}
+.tab{appearance:none;border:1px solid var(--line);border-bottom:none;background:var(--bg);color:var(--dim);font:bold 14px Arial,Helvetica,sans-serif;
+  padding:9px 18px;border-radius:8px 8px 0 0;cursor:pointer}
+.tab[aria-selected=true]{background:var(--green);color:#0d1117;border-color:var(--green)}
+.tab .n{font-weight:400;font-size:12px;opacity:.8;margin-left:4px}
+.st{display:inline-block;padding:1px 8px;border-radius:9px;font-size:12px;font-weight:700;white-space:nowrap}
+.st-in{background:#123321;color:var(--green2)}.st-traded{background:#1b2f4a;color:var(--blue)}
+.st-missing{background:#4a1515;color:#ff9b94}.st-out{background:#3d2912;color:var(--amber);font-style:italic}
+.loan{color:var(--dim);white-space:nowrap}
+.warn{color:#ff9b94}
 .when{display:block;color:var(--dim);font-size:11px;font-weight:400}
 tr.detail td{background:#0f141a;border-bottom:1px solid var(--line);padding:10px 16px 12px 34px}
 .dl{display:grid;grid-template-columns:max-content 1fr;gap:4px 14px;font-size:13px}
@@ -99,103 +110,136 @@ tr.detail td{background:#0f141a;border-bottom:1px solid var(--line);padding:10px
 <body>
 <header>
   <h1>Faction Armory</h1>
-  <div class="sub">Weapons and armor with bonuses. Click a row for details. Updated <span id="gen"></span> (TCT).</div>
+  <div class="sub">Weapons and armor with bonuses. Click a row for details. Page built <span id="gen"></span> TCT · <span id="sync"></span></div>
 </header>
+<div class="tabs" role="tablist">
+  <button class="tab" role="tab" id="tab-weapons" data-type="weapons" aria-selected="true">Weapons<span class="n" id="n-weapons"></span></button>
+  <button class="tab" role="tab" id="tab-armor" data-type="armor" aria-selected="false">Armor<span class="n" id="n-armor"></span></button>
+</div>
 <div class="controls">
   <input id="q" type="search" placeholder="Search item, label, note, bonus…" aria-label="Search">
-  <select id="cat" aria-label="Category"><option value="">All categories</option><option>Primary</option><option>Secondary</option><option>Melee</option><option>Armor</option></select>
-  <select id="src" aria-label="Source"><option value="">Armory + not in armory</option><option>Armory</option><option>Not in armory</option></select>
+  <select id="cat" aria-label="Category"><option value="">All categories</option><option>Primary</option><option>Secondary</option><option>Melee</option></select>
+  <select id="src" aria-label="Status"><option value="">Any status</option><option value="in">In armory</option><option value="loaned">Loaned out</option><option value="traded">Traded</option><option value="missing">Missing</option><option value="out">Not in armory</option></select>
   <label><input id="lab" type="checkbox"> Labeled only</label>
   <label><input id="trd" type="checkbox"> Traded only</label>
   <span class="count" id="count"></span>
 </div>
 <div class="wrap">
   <table>
-    <thead><tr>
-      <th data-k="item">Item</th><th data-k="category">Category</th><th data-k="source">Source</th><th data-k="label">Label</th>
-      <th data-k="note">Note</th><th data-k="damage" class="num">Damage</th><th data-k="accuracy" class="num">Accuracy</th>
-      <th data-k="defence" class="num">Defence</th><th data-k="bonuses">Bonuses</th><th data-k="tradeAt">Last trade</th>
-    </tr></thead>
+    <thead><tr id="head"></tr></thead>
     <tbody id="body"></tbody>
   </table>
   <div class="empty" id="empty" hidden>No items match.</div>
 </div>
-<script type="application/json" id="data">${safeJson({ generatedAt, rows })}</script>
+<script type="application/json" id="data">${safeJson({ generatedAt, rows, sync })}</script>
 <script nonce="${n}">
 (function () {
   'use strict';
   var DATA = JSON.parse(document.getElementById('data').textContent);
   var COLORS = ['red', 'orange', 'yellow', 'green', 'teal', 'blue', 'purple', 'gray'];
-  var state = { k: '', dir: 1, open: {} };
+  var state = { k: '', dir: 1, open: {}, type: 'weapons' };
   var $ = function (id) { return document.getElementById(id); };
   function tct(ms) { return ms ? new Date(ms).toISOString().slice(0, 16).replace('T', ' ') : ''; }
   function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined && text !== '') e.textContent = text; return e; }
   function num(v) { return typeof v === 'number' ? v.toFixed(2) : ''; }
   $('gen').textContent = tct(DATA.generatedAt);
+  var sy = DATA.sync || {};
+  if (!sy.configured) $('sync').textContent = 'armory sync not set up (status based on editors’ armory views)';
+  else if (sy.lastOk) { $('sync').textContent = 'armory synced ' + tct(sy.lastOk) + ' TCT'; }
+  else $('sync').textContent = 'armory sync has not run yet';
+  if (sy.configured && sy.lastError) { var w = el('span', 'warn', ' · last sync failed: ' + sy.lastError); $('sync').appendChild(w); }
 
+  // Columns per tab. Each: [key, title, cell(row) -> Node|string, class]
+  var COLS = {
+    weapons: ['item', 'category', 'status', 'loanedTo', 'label', 'note', 'damage', 'accuracy', 'bonuses', 'tradeAt'],
+    armor: ['item', 'status', 'loanedTo', 'label', 'note', 'defence', 'bonuses', 'tradeAt']
+  };
+  var TITLES = { item: 'Item', category: 'Category', status: 'Status', loanedTo: 'Loaned to', label: 'Label', note: 'Note',
+    damage: 'Damage', accuracy: 'Accuracy', defence: 'Defence', bonuses: 'Bonuses', tradeAt: 'Last trade' };
+  var NUM = { damage: 'dmg', accuracy: 'acc', defence: 'def' };
+  function cell(k, r) {
+    var td;
+    if (k === 'item') return el('td', 'item', r.item);
+    if (k === 'category') return el('td', 'cat-' + r.category, r.category);
+    if (k === 'status') { td = el('td'); td.appendChild(el('span', 'st st-' + r.statusKind, r.status)); return td; }
+    if (k === 'loanedTo') return el('td', 'loan', r.loanedTo);
+    if (k === 'label') { td = el('td'); if (r.label) td.appendChild(el('span', 'lbl ' + (COLORS.indexOf(r.color) >= 0 ? 'c-' + r.color : 'c-blue'), r.label)); return td; }
+    if (k === 'note') return el('td', 'note', r.note);
+    if (NUM[k]) return el('td', 'num ' + NUM[k], num(r[k]));
+    if (k === 'bonuses') return el('td', 'bon', r.bonuses);
+    if (k === 'tradeAt') { td = el('td'); if (r.tradedTo) { var s = el('span', 'trade', 'Traded to ' + r.tradedTo); s.appendChild(el('span', 'when', tct(r.tradeAt))); td.appendChild(s); } return td; }
+    return el('td');
+  }
+  function sortVal(k, r) { return k === 'status' ? r.statusKind + r.status : r[k]; }
+  function inTab(r) { return r.type === state.type; }
   function matches(r) {
-    var q = $('q').value.trim().toLowerCase();
-    if ($('cat').value && r.category !== $('cat').value) return false;
-    if ($('src').value && r.source !== $('src').value) return false;
+    if (!inTab(r)) return false;
+    var q = $('q').value.trim().toLowerCase(), st = $('src').value;
+    if (state.type === 'weapons' && $('cat').value && r.category !== $('cat').value) return false;
+    if (st === 'loaned' ? !r.loanedTo : st && r.statusKind !== st) return false;
     if ($('lab').checked && !r.label) return false;
     if ($('trd').checked && !r.tradedTo) return false;
     if (!q) return true;
-    return [r.item, r.category, r.source, r.label, r.note, r.bonuses, r.tradedTo].join(' ').toLowerCase().indexOf(q) !== -1;
+    return [r.item, r.category, r.status, r.loanedTo, r.label, r.note, r.bonuses, r.tradedTo].join(' ').toLowerCase().indexOf(q) !== -1;
   }
   function cmp(a, b) {
     var k = state.k; if (!k) return 0;
-    var x = a[k], y = b[k];
-    var ex = x === '' || x === null, ey = y === '' || y === null;
+    var x = sortVal(k, a), y = sortVal(k, b);
+    var ex = x === '' || x === null || x === undefined, ey = y === '' || y === null || y === undefined;
     if (ex || ey) return ex === ey ? 0 : ex ? 1 : -1; // blanks last
     return (typeof x === 'number' && typeof y === 'number' ? x - y : String(x).localeCompare(String(y))) * state.dir;
   }
-  function detailRow(r) {
-    var tr = el('tr', 'detail'); var td = el('td'); td.colSpan = 10;
+  function detailRow(r, span) {
+    var tr = el('tr', 'detail'); var td = el('td'); td.colSpan = span;
     var dl = el('dl', 'dl');
     function add(k, v) { dl.appendChild(el('dt', '', k)); dl.appendChild(el('dd', '', v || '—')); }
     add('Armory ID', r.armoryId);
+    add('Status', r.status);
     add('Last edited', r.lastEditedBy ? r.lastEditedBy + ', ' + tct(r.lastEdited) : '');
     add('Previous edit', r.prevBy ? r.prevBy + ', ' + tct(r.prevAt) : '');
-    add('Last trade', r.tradedTo ? (r.tradedFrom ? r.tradedFrom + ' \\u2192 ' : '') + r.tradedTo + ', ' + tct(r.tradeAt) : '');
+    add('Last trade', r.tradedTo ? (r.tradedFrom ? r.tradedFrom + ' → ' : '') + r.tradedTo + ', ' + tct(r.tradeAt) : '');
     add('Trade logged by', r.tradeLoggedBy);
     td.appendChild(dl); tr.appendChild(td); return tr;
   }
+  function renderHead() {
+    var head = $('head'); head.textContent = '';
+    COLS[state.type].forEach(function (k) {
+      var th = el('th', NUM[k] ? 'num' : '', TITLES[k]); th.setAttribute('data-k', k);
+      if (state.k === k) th.setAttribute('aria-sort', state.dir === 1 ? 'ascending' : 'descending');
+      th.addEventListener('click', function () { state.dir = state.k === k ? -state.dir : 1; state.k = k; renderHead(); render(); });
+      head.appendChild(th);
+    });
+    $('cat').hidden = state.type !== 'weapons';
+  }
   function render() {
+    var cols = COLS[state.type];
     var rows = DATA.rows.filter(matches).slice();
     if (state.k) rows.sort(cmp);
     var body = $('body'); body.textContent = '';
     rows.forEach(function (r, i) {
       var tr = el('tr', 'main ' + (i % 2 ? 'b' : 'a') + (state.open[r.armoryId] ? ' open' : ''));
       tr.tabIndex = 0; tr.setAttribute('aria-expanded', state.open[r.armoryId] ? 'true' : 'false');
-      tr.appendChild(el('td', 'item', r.item));
-      tr.appendChild(el('td', 'cat-' + r.category, r.category));
-      tr.appendChild(el('td', r.source === 'Armory' ? 'src-armory' : 'src-out', r.source));
-      var lt = el('td'); if (r.label) lt.appendChild(el('span', 'lbl ' + (COLORS.indexOf(r.color) >= 0 ? 'c-' + r.color : 'c-blue'), r.label)); tr.appendChild(lt);
-      tr.appendChild(el('td', 'note', r.note));
-      tr.appendChild(el('td', 'num dmg', num(r.damage)));
-      tr.appendChild(el('td', 'num acc', num(r.accuracy)));
-      tr.appendChild(el('td', 'num def', num(r.defence)));
-      tr.appendChild(el('td', 'bon', r.bonuses));
-      var tt = el('td'); if (r.tradedTo) { var s = el('span', 'trade', 'Traded to ' + r.tradedTo); s.appendChild(el('span', 'when', tct(r.tradeAt))); tt.appendChild(s); } tr.appendChild(tt);
+      cols.forEach(function (k) { tr.appendChild(cell(k, r)); });
       function toggle() { state.open[r.armoryId] = !state.open[r.armoryId]; render(); }
       tr.addEventListener('click', toggle);
       tr.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
       body.appendChild(tr);
-      if (state.open[r.armoryId]) body.appendChild(detailRow(r));
+      if (state.open[r.armoryId]) body.appendChild(detailRow(r, cols.length));
     });
+    var total = DATA.rows.filter(inTab).length;
     $('empty').hidden = rows.length > 0;
-    $('count').textContent = rows.length + ' of ' + DATA.rows.length + ' items';
+    $('count').textContent = rows.length + ' of ' + total + ' items';
   }
-  document.querySelectorAll('thead th').forEach(function (th) {
-    th.addEventListener('click', function () {
-      var k = th.getAttribute('data-k');
-      state.dir = state.k === k ? -state.dir : 1; state.k = k;
-      document.querySelectorAll('thead th').forEach(function (h) { h.removeAttribute('aria-sort'); });
-      th.setAttribute('aria-sort', state.dir === 1 ? 'ascending' : 'descending');
-      render();
+  ['weapons', 'armor'].forEach(function (t) {
+    $('n-' + t).textContent = '(' + DATA.rows.filter(function (r) { return r.type === t; }).length + ')';
+    $('tab-' + t).addEventListener('click', function () {
+      state.type = t; state.k = ''; state.dir = 1;
+      ['weapons', 'armor'].forEach(function (x) { $('tab-' + x).setAttribute('aria-selected', String(x === t)); });
+      renderHead(); render();
     });
   });
   ['q', 'cat', 'src', 'lab', 'trd'].forEach(function (id) { $(id).addEventListener('input', render); $(id).addEventListener('change', render); });
+  renderHead();
   render();
 })();
 </script>
