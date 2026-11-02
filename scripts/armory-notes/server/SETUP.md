@@ -134,6 +134,20 @@ To fix a mistake later, use **Tampermonkey menu > Trade log (editors)**: it list
 
 **Keep the link private.** Anyone with it, or anyone who can see the formula in the sheet, can read every faction note. If it leaks, change `EXPORT_TOKEN`, click Deploy, and update the formula; the old link stops working immediately.
 
+## Shareable web page (optional)
+
+A read-only page with the same list, served by your Worker, so no Google account is involved and nothing is cached.
+It has a dark theme, colored labels, search, filters and sorting. Editor names stay hidden until a row is clicked.
+
+1. In the Worker's **Settings > Runtime variables and secrets**, add a **Secret** named `VIEW_TOKEN` with a long random value (32+ characters). **Copy it first**: Cloudflare won't show it again. Click **Deploy**.
+2. Share this link (with your token):
+
+   ```
+   https://torn-armory-notes.<your-subdomain>.workers.dev/view?key=YOUR_VIEW_TOKEN
+   ```
+
+Anyone with the link can view the list. To revoke it, change `VIEW_TOKEN` and click Deploy; the old link stops working at once. The "hidden" editor names are only tucked away on screen: they are still in the page data.
+
 ## Day-to-day
 
 | Task | How |

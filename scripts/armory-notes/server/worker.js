@@ -1,3 +1,5 @@
+import { viewHtml } from './view.mjs';
+
 /**
  * Torn Armory Notes - shared faction notes server (Cloudflare Worker + D1).
  *
@@ -18,6 +20,8 @@
  *                                fingerprint, itemName, direction: 'out'|'in' }] }
  *                                (replaces earlier log; fingerprints are matched here)
  *   DELETE /trades/:tradeId[/:armoryId]  editors: remove a trade's log (or one item)
+ *   GET    /view?key=            read-only web page of the same list (needs the VIEW_TOKEN
+ *                                secret; off when it is not set)
  *   GET    /export.csv?token=    bonus items + notes as CSV for a spreadsheet (needs the
  *                                EXPORT_TOKEN secret; off when it is not set)
  *
@@ -35,6 +39,7 @@
  *   EDITOR_IDS   (text)    comma-separated player IDs allowed to edit
  *   TOKEN_SECRET (secret)  random string for signing tokens
  *   EXPORT_TOKEN (secret)  optional: enables /export.csv for anyone with the link
+ *   VIEW_TOKEN   (secret)  optional: enables /view for anyone with the link
  *   DB           (D1 binding, see wrangler.toml)
  */
 
@@ -867,6 +872,57 @@ function statsFromFingerprint(fp) {
 }
 
 /**
+ * One row per weapon/armor with a bonus: armory items (seen by an editor's
+ * browser) first, then bonus items with a faction note that were never seen in
+ * the armory. Shared by the CSV export and the view page.
+ * @param {ReturnType<typeof settings>} cfg - Settings.
+ * @returns {Promise<Object[]>} Rows (times are epoch ms or null; stats numbers or '').
+ */
+async function sheetRows(cfg) {
+    // Live notes. Previous edit = the second-latest change in the history log.
+    const { results: noteRows } = await cfg.db.prepare(
+        `SELECT n.*,
+           (SELECT by_name FROM note_log l WHERE l.armory_id = n.armory_id ORDER BY at DESC, id DESC LIMIT 1 OFFSET 1) AS prev_by,
+           (SELECT at      FROM note_log l WHERE l.armory_id = n.armory_id ORDER BY at DESC, id DESC LIMIT 1 OFFSET 1) AS prev_at
+         FROM notes n WHERE n.deleted = 0`,
+    ).all();
+    const { results: itemRows } = await cfg.db.prepare("SELECT * FROM tracked_items WHERE bonuses <> ''").all();
+    // Latest logged trade per item.
+    const { results: tradeRows } = await cfg.db.prepare(
+        `SELECT t.* FROM trade_log t
+         WHERE t.id = (SELECT t2.id FROM trade_log t2 WHERE t2.armory_id = t.armory_id ORDER BY t2.logged_at DESC, t2.id DESC LIMIT 1)`,
+    ).all();
+    const lastTrade = new Map((tradeRows ?? []).map((t) => [t.armory_id, t]));
+
+    const rows = new Map();
+    for (const t of itemRows ?? []) rows.set(t.armory_id, { item: t, note: null });
+    for (const n of noteRows ?? []) {
+        const item = rows.get(n.armory_id)?.item ?? null;
+        if (item || n.bonuses) rows.set(n.armory_id, { item, note: n });
+    }
+    const CATEGORY_NAMES = { Defensive: 'Armor' };
+    return [...rows.entries()]
+        .map(([id, { item, note }]) => {
+            const st = statsFromFingerprint(item?.fingerprint || note?.fingerprint || '');
+            const trade = lastTrade.get(id);
+            return {
+                item: item?.item_name || note?.item_name || '',
+                category: item?.category ? (CATEGORY_NAMES[item.category] ?? item.category) : '',
+                source: item ? 'Armory' : 'Not in armory',
+                label: note?.label ?? '', note: note?.text ?? '', color: note?.color ?? '',
+                armoryId: id, damage: st.damage, accuracy: st.accuracy, defence: st.defence,
+                bonuses: item?.bonuses || note?.bonuses || '',
+                lastEditedBy: note?.updated_by_name ?? '', lastEdited: note?.updated_at ?? null,
+                prevBy: note?.prev_by ?? '', prevAt: note?.prev_at ?? null,
+                tradedTo: trade?.to_name ?? '', tradedFrom: trade?.from_name ?? '',
+                tradeAt: trade?.logged_at ?? null, tradeLoggedBy: trade?.logged_by_name ?? '',
+            };
+        })
+        .sort((a, b) => Number(a.source !== 'Armory') - Number(b.source !== 'Armory')
+            || a.item.localeCompare(b.item) || a.armoryId.localeCompare(b.armoryId));
+}
+
+/**
  * GET /export.csv?token=… - live faction notes for a spreadsheet
  * (e.g. Google Sheets =IMPORTDATA). Off unless EXPORT_TOKEN is set.
  * @param {Request} request - Request.
@@ -880,49 +936,15 @@ async function handleExport(request, url, env, cfg) {
     if (expected.length < CONFIG.EXPORT_TOKEN_MIN) throw new HttpError(404, 'not_found', 'Not found.');
     if (!safeEqual(url.searchParams.get('token') ?? '', expected)) throw new HttpError(403, 'bad_token', 'Invalid export token.');
 
-    // Live notes. Previous edit = the second-latest change in the history log.
-    const { results: noteRows } = await cfg.db.prepare(
-        `SELECT n.*,
-           (SELECT by_name FROM note_log l WHERE l.armory_id = n.armory_id ORDER BY at DESC, id DESC LIMIT 1 OFFSET 1) AS prev_by,
-           (SELECT at      FROM note_log l WHERE l.armory_id = n.armory_id ORDER BY at DESC, id DESC LIMIT 1 OFFSET 1) AS prev_at
-         FROM notes n WHERE n.deleted = 0`,
-    ).all();
-    // Bonus items seen in the faction armory (with or without a note).
-    const { results: itemRows } = await cfg.db.prepare("SELECT * FROM tracked_items WHERE bonuses <> ''").all();
-    // Latest logged trade per item.
-    const { results: tradeRows } = await cfg.db.prepare(
-        `SELECT t.* FROM trade_log t
-         WHERE t.id = (SELECT t2.id FROM trade_log t2 WHERE t2.armory_id = t.armory_id ORDER BY t2.logged_at DESC, t2.id DESC LIMIT 1)`,
-    ).all();
-    const lastTrade = new Map((tradeRows ?? []).map((t) => [t.armory_id, t]));
-
-    /** One sheet row per armory ID. Only weapons/armor with a bonus are listed. */
-    const rows = new Map();
-    for (const t of itemRows ?? []) rows.set(t.armory_id, { item: t, note: null });
-    for (const n of noteRows ?? []) {
-        const item = rows.get(n.armory_id)?.item ?? null;
-        if (item || n.bonuses) rows.set(n.armory_id, { item, note: n });
-    }
-    const CATEGORY_NAMES = { Defensive: 'Armor' };
-    const sorted = [...rows.entries()]
-        .map(([id, r]) => ({ id, ...r, name: r.item?.item_name || r.note?.item_name || '' }))
-        // Armory items first, then faction notes on items never seen in the armory.
-        .sort((a, b) => Number(!a.item) - Number(!b.item) || a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
-
     const header = ['Item', 'Category', 'Source', 'Label', 'Note', 'Color', 'Armory ID', 'Damage', 'Accuracy', 'Defence', 'Bonuses',
         'Last edited by', 'Last edited (TCT)', 'Previous edit by', 'Previous edit (TCT)',
         'Last trade', 'Last trade (TCT)', 'Trade logged by'];
     const lines = [header.map(csvCell).join(',')];
-    for (const { id, item, note, name } of sorted) {
-        const fp = item?.fingerprint || note?.fingerprint || '';
-        const st = statsFromFingerprint(fp);
-        const category = item?.category ? (CATEGORY_NAMES[item.category] ?? item.category) : '';
-        const trade = lastTrade.get(id);
+    for (const r of await sheetRows(cfg)) {
         lines.push([
-            name, category, item ? 'Armory' : 'Not in armory', note?.label ?? '', note?.text ?? '', note?.color ?? '', id,
-            st.damage, st.accuracy, st.defence, item?.bonuses || note?.bonuses || '',
-            note?.updated_by_name ?? '', tct(note?.updated_at), note?.prev_by ?? '', tct(note?.prev_at),
-            trade ? `Traded to ${trade.to_name}` : '', tct(trade?.logged_at), trade?.logged_by_name ?? '',
+            r.item, r.category, r.source, r.label, r.note, r.color, r.armoryId, r.damage, r.accuracy, r.defence, r.bonuses,
+            r.lastEditedBy, tct(r.lastEdited), r.prevBy, tct(r.prevAt),
+            r.tradedTo ? `Traded to ${r.tradedTo}` : '', tct(r.tradeAt), r.tradeLoggedBy,
         ].map(csvCell).join(','));
     }
     return new Response(`${lines.join('\r\n')}\r\n`, {
@@ -932,6 +954,38 @@ async function handleExport(request, url, env, cfg) {
             'Content-Disposition': 'inline; filename="armory-notes.csv"',
             'Cache-Control': 'no-store',
             'X-Robots-Tag': 'noindex',
+        },
+    });
+}
+
+/**
+ * GET /view?key=… - read-only page listing the same rows as the export, for
+ * sharing without a Google account. Off unless VIEW_TOKEN is set.
+ * @param {Request} request - Request.
+ * @param {URL} url - Parsed URL.
+ * @param {Object} env - Worker env.
+ * @param {ReturnType<typeof settings>} cfg - Settings.
+ * @returns {Promise<Response>} HTML response.
+ */
+async function handleView(request, url, env, cfg) {
+    const expected = String(env.VIEW_TOKEN ?? '');
+    const plain = (status, text) => new Response(text, {
+        status, headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex' },
+    });
+    if (expected.length < CONFIG.EXPORT_TOKEN_MIN) return plain(404, 'Not found.');
+    if (!safeEqual(url.searchParams.get('key') ?? '', expected)) return plain(403, 'This link is not valid. Ask your faction for the current one.');
+    const nonce = crypto.randomUUID().replace(/-/g, '');
+    return new Response(viewHtml(await sheetRows(cfg), nonce, Date.now()), {
+        status: 200,
+        headers: {
+            'Content-Type': 'text/html; charset=utf-8',
+            'Cache-Control': 'no-store',
+            'X-Robots-Tag': 'noindex, nofollow',
+            'Referrer-Policy': 'no-referrer',
+            'X-Content-Type-Options': 'nosniff',
+            'X-Frame-Options': 'DENY',
+            'Content-Security-Policy': `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; `
+                + "img-src 'none'; connect-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         },
     });
 }
@@ -971,6 +1025,7 @@ export default {
             if (t && !t[2] && request.method === 'POST') return await handleTradeLog(request, t[1], cfg);
             if (t && request.method === 'DELETE') return await handleTradeDelete(request, t[1], t[2], cfg);
             if (path === '/export.csv' && request.method === 'GET') return await handleExport(request, url, env, cfg);
+            if (path === '/view' && request.method === 'GET') return await handleView(request, url, env, cfg);
             const m = path.match(/^\/notes\/([^/]+)$/);
             if (m && request.method === 'PUT') return await handlePut(request, m[1], cfg);
             if (m && request.method === 'DELETE') return await handleDelete(request, m[1], cfg);
