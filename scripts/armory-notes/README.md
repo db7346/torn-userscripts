@@ -15,6 +15,7 @@ Attach a colored label and a note to individual weapons and armor. Notes are tie
 - **Faction Armory:** shared faction notes, refreshed every 45 seconds while the tab is visible. Hover shows who edited a note last and when.
 - **Items page:** your private notes (row and thumbnail views), plus a faction pill (with a people icon) when an item has a faction note. Editors can click it to edit or delete the faction note, which is handy for items in your own inventory; everyone else sees it read-only.
 - **Trade pages:** faction notes show read-only on your own items, in the trade view, on the add-items screen and on its confirmation step, and on **the other person's items** in the trade view (matched by the item's stats), so you can see a faction-owned item before you send it
+- **Live spreadsheet** (optional, set up by the notes admin): every faction note with item stats, bonuses, last edit and previous edit, in Google Sheets
 - Upload your existing local notes to the faction in one step
 - Label autocomplete, plus backup and restore of local notes
 
@@ -91,6 +92,7 @@ That is about **1 Torn API call per 12 hours**, and about **1.3 server requests 
 
 ## Changelog
 
+- **2.3.0**: Editors' browsers also record each noted item's bonuses ("22% Execute"). The server can publish a live spreadsheet feed of faction notes, with stats, bonuses, last edit and previous edit, for Google Sheets (see SETUP.md). Needs migration `0002_bonuses.sql`.
 - **2.2.0**: Trade view shows faction notes on the other person's items too, matched by item stats ("fingerprint"), since Torn shows no ID for them. Editors' browsers record fingerprints automatically from the armory, Items page and their own trades. Needs the server update in this release and the `migrations/0001_fingerprint.sql` database change (see SETUP.md).
 - **2.1.1**: Trade add-items confirmation step ("Are you sure you wish to add…") now shows faction notes too.
 - **2.1.0**: Trade pages. Faction notes show read-only (for everyone, editors included) on your own items in the trade view and on the add-items screen. No polling there: at most one refresh per page load.

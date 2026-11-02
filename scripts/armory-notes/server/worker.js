@@ -7,8 +7,10 @@
  *   PUT    /notes/:armoryId      editors: create/update one note
  *   DELETE /notes/:armoryId      editors: delete one note
  *   POST   /notes/import         editors: bulk upload { notes: [...] } (never overwrites)
- *   POST   /notes/fingerprints   editors: record item stat fingerprints
- *                                { items: [{ armoryId, fingerprint }] }
+ *   POST   /notes/fingerprints   editors: record item stat fingerprints and bonuses
+ *                                { items: [{ armoryId, fingerprint, bonuses }] }
+ *   GET    /export.csv?token=    live notes as CSV for a spreadsheet (needs the
+ *                                EXPORT_TOKEN secret; off when it is not set)
  *
  * Sync: clients poll with ?since=<changed>. `changed_at` moves on every change
  * (including fingerprint updates); `updated_at` is the last edit shown to users.
@@ -23,6 +25,7 @@
  *   FACTION_ID   (text)    faction allowed to use this server
  *   EDITOR_IDS   (text)    comma-separated player IDs allowed to edit
  *   TOKEN_SECRET (secret)  random string for signing tokens
+ *   EXPORT_TOKEN (secret)  optional: enables /export.csv for anyone with the link
  *   DB           (D1 binding, see wrangler.toml)
  */
 
@@ -45,6 +48,9 @@ const CONFIG = Object.freeze({
     /** "w|name|damage|accuracy" or "a|name|defence|bonuses"; no control characters. */
     FINGERPRINT_PATTERN: /^[wa]\|[^\u0000-\u001f]{3,248}$/,
     MAX_FINGERPRINTS: 500,
+    /** Readable bonus text, e.g. "22% Execute, 34% Stricken". */
+    BONUSES_MAX: 200,
+    EXPORT_TOKEN_MIN: 16,
     API_KEY_PATTERN: /^[A-Za-z0-9]{16}$/,
 });
 
@@ -274,7 +280,21 @@ function cleanNote(raw) {
     const color = CONFIG.COLORS.includes(raw.color) ? raw.color : 'blue';
     const itemName = String(raw.itemName ?? '').slice(0, CONFIG.NAME_MAX);
     const itemId = /^\d{1,10}$/.test(String(raw.itemId ?? '')) ? String(raw.itemId) : '';
-    return { label, color, text, itemName, itemId, fingerprint: cleanFingerprint(raw.fingerprint) };
+    return {
+        label, color, text, itemName, itemId,
+        fingerprint: cleanFingerprint(raw.fingerprint),
+        bonuses: cleanBonuses(raw.bonuses),
+    };
+}
+
+/**
+ * Validate optional bonus text ("22% Execute"). Empty is allowed (no bonus).
+ * @param {unknown} b - Candidate.
+ * @returns {string|null} Clean text, or null if missing or invalid (keep stored).
+ */
+function cleanBonuses(b) {
+    if (typeof b !== 'string' || b.length > CONFIG.BONUSES_MAX || /[\u0000-\u001f]/.test(b)) return null;
+    return b.trim();
 }
 
 /**
@@ -302,6 +322,7 @@ function rowToNote(row) {
         updated: row.updated_at,
         changed: row.changed_at || row.updated_at,
         fingerprint: row.fingerprint ?? '',
+        bonuses: row.bonuses ?? '',
         updatedById: row.updated_by_id,
         updatedByName: row.updated_by_name,
         deleted: row.deleted === 1,
@@ -390,16 +411,17 @@ async function handleList(request, url, cfg) {
 function upsertStmt(db, id, n, user, now) {
     return db.prepare(
         `INSERT INTO notes (armory_id, label, color, text, item_name, item_id, updated_at, updated_by_id, updated_by_name,
-                            deleted, fingerprint, changed_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, COALESCE(?10, ''), ?7)
+                            deleted, fingerprint, changed_at, bonuses)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, COALESCE(?10, ''), ?7, COALESCE(?11, ''))
          ON CONFLICT(armory_id) DO UPDATE SET
            label = excluded.label, color = excluded.color, text = excluded.text,
            item_name = CASE WHEN excluded.item_name <> '' THEN excluded.item_name ELSE notes.item_name END,
            item_id = CASE WHEN excluded.item_id <> '' THEN excluded.item_id ELSE notes.item_id END,
            fingerprint = COALESCE(?10, notes.fingerprint),
+           bonuses = COALESCE(?11, notes.bonuses),
            updated_at = excluded.updated_at, changed_at = excluded.changed_at, updated_by_id = excluded.updated_by_id,
            updated_by_name = excluded.updated_by_name, deleted = 0`,
-    ).bind(id, n.label, n.color, n.text, n.itemName, n.itemId, now, user.pid, user.name, n.fingerprint ?? null);
+    ).bind(id, n.label, n.color, n.text, n.itemName, n.itemId, now, user.pid, user.name, n.fingerprint ?? null, n.bonuses ?? null);
 }
 
 /**
@@ -450,7 +472,7 @@ async function handleDelete(request, rawId, cfg) {
     const now = Date.now();
     await cfg.db.batch([
         cfg.db.prepare(
-            `UPDATE notes SET deleted = 1, label = '', text = '', fingerprint = '', updated_at = ?2, changed_at = ?2,
+            `UPDATE notes SET deleted = 1, label = '', text = '', fingerprint = '', bonuses = '', updated_at = ?2, changed_at = ?2,
                     updated_by_id = ?3, updated_by_name = ?4
              WHERE armory_id = ?1`,
         ).bind(id, now, user.pid, user.name),
@@ -513,8 +535,8 @@ async function handleImport(request, cfg) {
 }
 
 /**
- * POST /notes/fingerprints - record item stat fingerprints (editors).
- * Only live notes are touched, and only when the fingerprint differs. Moves
+ * POST /notes/fingerprints - record item stat fingerprints and bonus text
+ * (editors). Only live notes are touched, and only when something differs. Moves
  * `changed_at` so other members' polls pick it up, but not `updated_at` or the
  * editor name (this is not an edit of the note).
  * @param {Request} request - Request.
@@ -529,28 +551,32 @@ async function handleFingerprints(request, cfg) {
     if (!list) throw new HttpError(400, 'bad_fingerprints', 'Expected { items: [...] }.');
     if (list.length > CONFIG.MAX_FINGERPRINTS) throw new HttpError(413, 'too_many', `At most ${CONFIG.MAX_FINGERPRINTS} items per request.`);
 
+    /** @type {Map<string, {fp: string, bonuses: (string|null)}>} */
     const updates = new Map();
     for (const raw of list) {
         const fp = cleanFingerprint(raw?.fingerprint);
         const id = String(raw?.armoryId ?? '');
-        if (fp && CONFIG.ARMORY_ID_PATTERN.test(id)) updates.set(id, fp);
+        if (fp && CONFIG.ARMORY_ID_PATTERN.test(id)) updates.set(id, { fp, bonuses: cleanBonuses(raw?.bonuses) });
     }
-    // Only notes that exist, are live and have a different fingerprint change.
+    // Only notes that exist, are live and differ change.
     const ids = [...updates.keys()];
     const toChange = [];
     for (let i = 0; i < ids.length; i += 90) {
         const chunk = ids.slice(i, i + 90);
         const marks = chunk.map((_, j) => `?${j + 1}`).join(',');
         const { results } = await cfg.db
-            .prepare(`SELECT armory_id, fingerprint FROM notes WHERE deleted = 0 AND armory_id IN (${marks})`)
+            .prepare(`SELECT armory_id, fingerprint, bonuses FROM notes WHERE deleted = 0 AND armory_id IN (${marks})`)
             .bind(...chunk)
             .all();
-        for (const r of results ?? []) if (r.fingerprint !== updates.get(r.armory_id)) toChange.push(r.armory_id);
+        for (const r of results ?? []) {
+            const u = updates.get(r.armory_id);
+            if (r.fingerprint !== u.fp || (u.bonuses !== null && r.bonuses !== u.bonuses)) toChange.push(r.armory_id);
+        }
     }
     const now = Date.now();
     const stmts = toChange.map((id) => cfg.db.prepare(
-        'UPDATE notes SET fingerprint = ?2, changed_at = ?3 WHERE armory_id = ?1 AND deleted = 0',
-    ).bind(id, updates.get(id), now));
+        'UPDATE notes SET fingerprint = ?2, bonuses = COALESCE(?4, bonuses), changed_at = ?3 WHERE armory_id = ?1 AND deleted = 0',
+    ).bind(id, updates.get(id).fp, now, updates.get(id).bonuses));
     for (let i = 0; i < stmts.length; i += 100) await cfg.db.batch(stmts.slice(i, i + 100));
 
     const notes = [];
@@ -561,6 +587,102 @@ async function handleFingerprints(request, cfg) {
         notes.push(...(results ?? []).map(rowToNote));
     }
     return json(request, 200, { updated: notes.length, notes });
+}
+
+/* ===========================================================================
+ * CSV export
+ * ======================================================================== */
+
+/**
+ * Constant-time string comparison (for the export token).
+ * @param {string} a - First.
+ * @param {string} b - Second.
+ * @returns {boolean} True if equal.
+ */
+function safeEqual(a, b) {
+    const x = enc.encode(String(a));
+    const y = enc.encode(String(b));
+    let diff = x.length ^ y.length;
+    for (let i = 0; i < Math.max(x.length, y.length); i += 1) diff |= (x[i] ?? 0) ^ (y[i] ?? 0);
+    return diff === 0;
+}
+
+/**
+ * One CSV cell: quoted, line breaks flattened, and text that a spreadsheet
+ * would run as a formula (=, +, -, @) prefixed with an apostrophe.
+ * @param {unknown} v - Value (numbers are written as-is).
+ * @returns {string} CSV cell.
+ */
+function csvCell(v) {
+    if (typeof v === 'number' && Number.isFinite(v)) return String(v);
+    let t = String(v ?? '').replace(/\r?\n/g, ' / ');
+    if (/^[=+\-@\t\r]/.test(t)) t = `'${t}`;
+    return `"${t.replace(/"/g, '""')}"`;
+}
+
+/**
+ * Epoch ms as "YYYY-MM-DD HH:MM" in Torn City Time (UTC); '' if missing.
+ * @param {number|null|undefined} ms - Timestamp.
+ * @returns {string} Formatted time.
+ */
+function tct(ms) {
+    return Number.isFinite(ms) && ms > 0 ? new Date(ms).toISOString().slice(0, 16).replace('T', ' ') : '';
+}
+
+/**
+ * Stats from a fingerprint ("w|name|dmg|acc" or "a|name|def|bonuses").
+ * @param {string} fp - Fingerprint.
+ * @returns {{damage: (number|string), accuracy: (number|string), defence: (number|string)}} Stats ('' if unknown).
+ */
+function statsFromFingerprint(fp) {
+    const parts = String(fp ?? '').split('|');
+    const num = (s) => (s && /^\d+(\.\d+)?$/.test(s) ? Number(s) : '');
+    if (parts[0] === 'w') return { damage: num(parts[2]), accuracy: num(parts[3]), defence: '' };
+    if (parts[0] === 'a') return { damage: '', accuracy: '', defence: num(parts[2]) };
+    return { damage: '', accuracy: '', defence: '' };
+}
+
+/**
+ * GET /export.csv?token=… - live faction notes for a spreadsheet
+ * (e.g. Google Sheets =IMPORTDATA). Off unless EXPORT_TOKEN is set.
+ * @param {Request} request - Request.
+ * @param {URL} url - Parsed URL.
+ * @param {Object} env - Worker env.
+ * @param {ReturnType<typeof settings>} cfg - Settings.
+ * @returns {Promise<Response>} CSV response.
+ */
+async function handleExport(request, url, env, cfg) {
+    const expected = String(env.EXPORT_TOKEN ?? '');
+    if (expected.length < CONFIG.EXPORT_TOKEN_MIN) throw new HttpError(404, 'not_found', 'Not found.');
+    if (!safeEqual(url.searchParams.get('token') ?? '', expected)) throw new HttpError(403, 'bad_token', 'Invalid export token.');
+
+    // Previous edit = the second-latest change in the history log.
+    const { results } = await cfg.db.prepare(
+        `SELECT n.*,
+           (SELECT by_name FROM note_log l WHERE l.armory_id = n.armory_id ORDER BY at DESC, id DESC LIMIT 1 OFFSET 1) AS prev_by,
+           (SELECT at      FROM note_log l WHERE l.armory_id = n.armory_id ORDER BY at DESC, id DESC LIMIT 1 OFFSET 1) AS prev_at
+         FROM notes n WHERE n.deleted = 0 ORDER BY n.item_name, n.label, n.armory_id`,
+    ).all();
+
+    const header = ['Item', 'Label', 'Note', 'Color', 'Armory ID', 'Damage', 'Accuracy', 'Defence', 'Bonuses',
+        'Last edited by', 'Last edited (TCT)', 'Previous edit by', 'Previous edit (TCT)'];
+    const lines = [header.map(csvCell).join(',')];
+    for (const r of results ?? []) {
+        const st = statsFromFingerprint(r.fingerprint);
+        lines.push([
+            r.item_name, r.label, r.text, r.color, r.armory_id, st.damage, st.accuracy, st.defence, r.bonuses ?? '',
+            r.updated_by_name, tct(r.updated_at), r.prev_by ?? '', tct(r.prev_at),
+        ].map(csvCell).join(','));
+    }
+    return new Response(`${lines.join('\r\n')}\r\n`, {
+        status: 200,
+        headers: {
+            'Content-Type': 'text/csv; charset=utf-8',
+            'Content-Disposition': 'inline; filename="armory-notes.csv"',
+            'Cache-Control': 'no-store',
+            'X-Robots-Tag': 'noindex',
+        },
+    });
 }
 
 /* ===========================================================================
@@ -591,6 +713,7 @@ export default {
             if (path === '/notes' && request.method === 'GET') return await handleList(request, url, cfg);
             if (path === '/notes/import' && request.method === 'POST') return await handleImport(request, cfg);
             if (path === '/notes/fingerprints' && request.method === 'POST') return await handleFingerprints(request, cfg);
+            if (path === '/export.csv' && request.method === 'GET') return await handleExport(request, url, env, cfg);
             const m = path.match(/^\/notes\/([^/]+)$/);
             if (m && request.method === 'PUT') return await handlePut(request, m[1], cfg);
             if (m && request.method === 'DELETE') return await handleDelete(request, m[1], cfg);

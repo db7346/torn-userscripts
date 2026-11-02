@@ -95,8 +95,33 @@ Some releases change the database. Run each new file in [`migrations/`](migratio
 | File | Release | What it does |
 |---|---|---|
 | `0001_fingerprint.sql` | 2.2.0 | Adds item fingerprints (for matching the other person's trade items) and a separate sync marker |
+| `0002_bonuses.sql` | 2.3.0 | Adds readable bonus text ("22% Execute") for the spreadsheet export |
 
 New databases created from `schema.sql` already include every migration.
+
+## Live spreadsheet (optional)
+
+The server can publish the live faction notes as a spreadsheet feed for Google Sheets. It's off until you set a token.
+
+1. In the Worker's **Settings > Runtime variables and secrets**, add a **Secret** named `EXPORT_TOKEN` with a long random value (32+ characters, same method as `TOKEN_SECRET`). Click **Deploy**.
+2. Create a Google Sheet. In cell **A1**, enter:
+
+   ```
+   =IMPORTDATA("https://torn-armory-notes.<your-subdomain>.workers.dev/export.csv?token=YOUR_EXPORT_TOKEN")
+   ```
+
+3. Share the sheet with whoever should see it.
+
+Google refreshes it about once an hour, and when the sheet is opened.
+
+| Column | |
+|---|---|
+| Item, Label, Note, Color, Armory ID | The faction note |
+| Damage, Accuracy / Defence, Bonuses | The item's stats, recorded automatically by editors' browsers |
+| Last edited by / (TCT) | Who changed the note last, and when (Torn City Time) |
+| Previous edit by / (TCT) | The change before that (blank if there was only one) |
+
+**Keep the link private.** Anyone with it, or anyone who can see the formula in the sheet, can read every faction note. If it leaks, change `EXPORT_TOKEN`, click Deploy, and update the formula; the old link stops working immediately.
 
 ## Day-to-day
 

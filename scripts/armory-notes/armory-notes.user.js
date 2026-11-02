@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Armory Notes
 // @namespace    dadgum.torn.armorynotes
-// @version      2.2.0
+// @version      2.3.0
 // @description  Colored labels and notes on individual weapons and armor (keyed by armory ID). Private notes on the Items page; shared faction notes in the Faction Armory.
 // @author       DadGum
 // @license      MIT
@@ -48,6 +48,9 @@
  * Author: DadGum
  *
  * Changelog
+ *   2.3.0 (2026-11-01) Editors' browsers also record each noted item's
+ *                      bonuses ("22% Execute") for the faction's spreadsheet
+ *                      export. Stats are not recorded from a half-read row.
  *   2.2.0 (2026-11-01) Trade view: faction notes also show on the other
  *                      person's items, matched by item stats ("fingerprint":
  *                      name + damage + accuracy, or name + defence + bonus),
@@ -191,6 +194,7 @@
         EDITOR_NAME_MAX: 40,
         /** Same rule as the server: "w|…" or "a|…", no control characters. */
         FINGERPRINT_PATTERN: /^[wa]\|[^\u0000-\u001f]{3,248}$/,
+        BONUSES_MAX: 200,
         /** Fingerprints sent per request, and the wait before sending a batch. */
         FINGERPRINT_BATCH: 200,
         FINGERPRINT_FLUSH_MS: 3000,
@@ -358,6 +362,7 @@
     const DATA_SIG = 'tmsAnSig';
     const DATA_SRC = 'tmsAnSrc'; // 'local' | 'shared'
     const DATA_FP = 'tmsAnFp';   // item stat fingerprint (on buttons and rows)
+    const DATA_BONUS = 'tmsAnBonus'; // readable bonus text, e.g. "22% Execute"
     const TORN_TRANSIENT = new Set(CONFIG.TORN_TRANSIENT_CODES);
 
     /**
@@ -394,7 +399,7 @@
     /**
      * A faction (shared) note: a Note plus who last changed it and the item's
      * stat fingerprint ('' until an editor's browser has seen the item).
-     * @typedef {Note & {updatedById: number, updatedByName: string, fingerprint: string}} SharedNote
+     * @typedef {Note & {updatedById: number, updatedByName: string, fingerprint: string, bonuses: string}} SharedNote
      */
 
     /**
@@ -471,7 +476,7 @@
      * @property {(row: Element) => string} getItemId             - Item type ID.
      * @property {(row: Element) => string} getName               - Item display name.
      * @property {MountSpec[]} mounts                             - Button mount points.
-     * @property {(row: Element) => string} [getFingerprint]      - Item stat fingerprint ('' if none).
+     * @property {(row: Element) => (ItemStats|null)} [getStats]  - Item stats (null if unreadable).
      * @property {(row: Element) => boolean} [accepts]            - Row filter applied before getId.
      * @property {boolean} [dynamicIds]                           - IDs come from fingerprints; rows are
      *   rescanned when faction notes change and buttons removed when no note matches.
@@ -727,6 +732,7 @@
                     updatedById: Number.isInteger(byId) && byId > 0 ? byId : 0,
                     updatedByName: String(raw.updatedByName ?? '').slice(0, CONFIG.EDITOR_NAME_MAX),
                     fingerprint: Data.isFingerprint(raw.fingerprint) ? raw.fingerprint : '',
+                    bonuses: Data.isBonusText(raw.bonuses) ? raw.bonuses : '',
                 },
             };
         },
@@ -806,6 +812,25 @@
          */
         isFingerprint(fp) {
             return typeof fp === 'string' && CONFIG.FINGERPRINT_PATTERN.test(fp);
+        },
+
+        /**
+         * Whether a value is acceptable bonus text (may be empty).
+         * @param {unknown} b - Candidate.
+         * @returns {boolean} True if valid.
+         */
+        isBonusText(b) {
+            return typeof b === 'string' && b.length <= CONFIG.BONUSES_MAX && !/[\u0000-\u001f]/.test(b);
+        },
+
+        /**
+         * Readable bonus text for the spreadsheet: "22% Execute, 34% Stricken".
+         * @param {{name: string, value: string}[]} bonuses - Parsed bonuses.
+         * @returns {string} Text ('' if none).
+         */
+        formatBonuses(bonuses) {
+            const text = (bonuses ?? []).map((b) => (b.value ? `${b.value}% ${b.name}` : b.name)).join(', ');
+            return text.slice(0, CONFIG.BONUSES_MAX);
         },
 
         /**
@@ -1228,7 +1253,8 @@
                         changed.push(n.id);
                     }
                 } else if (!prev || Data.noteSignature(prev) !== Data.noteSignature(n.note)
-                    || prev.updatedById !== n.note.updatedById || prev.fingerprint !== n.note.fingerprint) {
+                    || prev.updatedById !== n.note.updatedById || prev.fingerprint !== n.note.fingerprint
+                    || prev.bonuses !== n.note.bonuses) {
                     this._notes[n.id] = n.note;
                     changed.push(n.id);
                 }
@@ -1408,23 +1434,25 @@
     // is sent at most once per page load.
 
     const FingerprintSync = {
-        /** @type {Map<string, string>} */
+        /** @type {Map<string, {fp: string, bonuses: string}>} */
         _queue: new Map(),
-        /** @type {Map<string, string>} */
+        /** @type {Map<string, string>} ID -> "fp\nbonuses" already sent. */
         _sent: new Map(),
         _timer: 0,
 
         /**
-         * Queue a fingerprint for a noted item (no-op unless needed).
+         * Queue a noted item's fingerprint and bonus text (no-op unless needed).
          * @param {string} id - Armory ID.
          * @param {string} fp - Fingerprint.
+         * @param {string} bonuses - Bonus text ("22% Execute").
          * @returns {void}
          */
-        offer(id, fp) {
-            if (!Data.isFingerprint(fp) || !Shared.isActive() || !Shared.canEdit()) return;
+        offer(id, fp, bonuses) {
+            if (!Data.isFingerprint(fp) || !Data.isBonusText(bonuses) || !Shared.isActive() || !Shared.canEdit()) return;
             const note = SharedStore.get(id);
-            if (!note || note.fingerprint === fp || this._sent.get(id) === fp) return;
-            this._queue.set(id, fp);
+            const key = `${fp}\n${bonuses}`;
+            if (!note || (note.fingerprint === fp && note.bonuses === bonuses) || this._sent.get(id) === key) return;
+            this._queue.set(id, { fp, bonuses });
             clearTimeout(this._timer);
             this._timer = setTimeout(() => {
                 this.flush().catch((err) => handleSharedError('Faction notes', err, { quiet: true }));
@@ -1437,9 +1465,9 @@
          * @throws {ServerError} On failure.
          */
         async flush() {
-            const items = [...this._queue].map(([armoryId, fingerprint]) => ({ armoryId, fingerprint }));
+            const items = [...this._queue].map(([armoryId, v]) => ({ armoryId, fingerprint: v.fp, bonuses: v.bonuses }));
             this._queue.clear();
-            for (const { armoryId, fingerprint } of items) this._sent.set(armoryId, fingerprint);
+            for (const it of items) this._sent.set(it.armoryId, `${it.fingerprint}\n${it.bonuses}`);
             for (let i = 0; i < items.length; i += CONFIG.FINGERPRINT_BATCH) {
                 const data = await Server.request('POST', '/notes/fingerprints', { body: { items: items.slice(i, i + CONFIG.FINGERPRINT_BATCH) } });
                 if (Array.isArray(data?.notes) && SharedStore.applyOwn(data.notes).length) rescanDynamic();
@@ -2507,7 +2535,10 @@ ${colorRules}
                     if (existing) await src.remove(id);
                 } else {
                     const fields = { label, color, text, itemName: name, itemId };
-                    if (shared && Data.isFingerprint(btn.dataset[DATA_FP])) fields.fingerprint = btn.dataset[DATA_FP];
+                    if (shared && Data.isFingerprint(btn.dataset[DATA_FP])) {
+                        fields.fingerprint = btn.dataset[DATA_FP];
+                        fields.bonuses = btn.dataset[DATA_BONUS] ?? '';
+                    }
                     await src.save(id, fields);
                 }
             }, 'Could not save note', 'Saving…');
@@ -2974,7 +3005,7 @@ ${colorRules}
         getCategory: (row) => row.dataset.category,
         getItemId: (row) => row.dataset.item ?? '',
         getName: (row) => ownText(row.querySelector(`${CONFIG.SEL.ITEMS_NAME_WRAP} ${CONFIG.SEL.ITEMS_NAME}`)),
-        getFingerprint: (row) => Data.makeFingerprint(ITEMS_ADAPTER.getName(row), statsFromIcons(row.querySelector(CONFIG.SEL.ITEMS_STATS))),
+        getStats: (row) => statsFromIcons(row.querySelector(CONFIG.SEL.ITEMS_STATS)),
         backfill: true,
         mounts: [
             {
@@ -3019,7 +3050,7 @@ ${colorRules}
         getCategory: (row) => row.querySelector(CONFIG.SEL.FACTION_TYPE)?.textContent.trim(),
         getItemId: (row) => row.querySelector(CONFIG.SEL.FACTION_ID_HOLDER)?.dataset.itemid ?? '',
         getName: (row) => ownText(row.querySelector(CONFIG.SEL.FACTION_NAME)),
-        getFingerprint: (row) => Data.makeFingerprint(FACTION_ADAPTER.getName(row), statsFromIcons(row.querySelector(CONFIG.SEL.FACTION_STATS))),
+        getStats: (row) => statsFromIcons(row.querySelector(CONFIG.SEL.FACTION_STATS)),
         backfill: true,
         mounts: [
             {
@@ -3068,7 +3099,7 @@ ${colorRules}
         getCategory: () => '',
         getItemId: (row) => /[?&#]itemID=(\d{1,10})/.exec(row.querySelector(CONFIG.SEL.TRADE_VIEW_REMOVE)?.getAttribute('href') ?? '')?.[1] ?? '',
         getName: (row) => ownText(row.querySelector(CONFIG.SEL.TRADE_VIEW_NAME)),
-        getFingerprint: (row) => tradeRowFingerprint(row),
+        getStats: (row) => tradeRowStats(row),
         backfill: true,
         mounts: [
             {
@@ -3099,21 +3130,26 @@ ${colorRules}
             return value && /^\d+(\.\d+)?$/.test(value) ? Number(value) : null;
         };
         const bonuses = [];
-        container.querySelectorAll('i[title][class*="bonus-attachment-"]').forEach((icon) => {
+        let incomplete = false;
+        container.querySelectorAll('i[class*="bonus-attachment-"]').forEach((icon) => {
             if (/bonus-attachment-(item-|blank-)/.test(icon.className)) return;
-            bonuses.push(...Data.parseBonuses(icon.getAttribute('title')));
+            const parsed = Data.parseBonuses(icon.getAttribute('title'));
+            // Torn's tooltip code blanks the title while the icon is hovered.
+            if (!parsed.length) incomplete = true;
+            bonuses.push(...parsed);
         });
+        if (incomplete) return null;
         return { damage: stat('damage'), accuracy: stat('accuracy'), defence: stat('defence'), bonuses };
     }
 
     /**
-     * Fingerprint of a trade-view row, from its info icon's tooltip text.
+     * Stats of a trade-view row, from its info icon's tooltip text.
      * @param {Element} row - Trade row.
-     * @returns {string} Fingerprint or ''.
+     * @returns {ItemStats|null} Stats, or null if the tooltip text is missing.
      */
-    function tradeRowFingerprint(row) {
+    function tradeRowStats(row) {
         const html = row.querySelector(CONFIG.SEL.TRADE_VIEW_INFO)?.getAttribute('title') ?? '';
-        return Data.makeFingerprint(ownText(row.querySelector(CONFIG.SEL.TRADE_VIEW_NAME)), Data.statsFromTooltip(html));
+        return html ? Data.statsFromTooltip(html) : null;
     }
 
     /**
@@ -3126,8 +3162,8 @@ ${colorRules}
         anyCategory: true,
         dynamicIds: true,
         accepts: (row) => !row.querySelector(CONFIG.SEL.TRADE_VIEW_REMOVE), // your rows are handled by ID
-        getFingerprint: tradeRowFingerprint,
-        getId: (row) => SharedStore.idByFingerprint(rowFingerprint(row, TRADE_PARTNER_ADAPTER)),
+        getStats: (row) => tradeRowStats(row),
+        getId: (row) => SharedStore.idByFingerprint(rowItemInfo(row, TRADE_PARTNER_ADAPTER).fp),
         getCategory: () => '',
         getItemId: () => '',
         getName: (row) => ownText(row.querySelector(CONFIG.SEL.TRADE_VIEW_NAME)),
@@ -3135,20 +3171,21 @@ ${colorRules}
     };
 
     /**
-     * A row's fingerprint, remembered on the row: Torn's tooltip code may
-     * blank the title while it is hovered.
+     * A row's fingerprint and bonus text, remembered on the row: Torn's
+     * tooltip code may blank a title while it is hovered, and a half-read row
+     * must not replace a good reading.
      * @param {Element} row - Item row.
      * @param {PageAdapter} adapter - Page adapter.
-     * @returns {string} Fingerprint or ''.
+     * @returns {{fp: string, bonuses: string}} Fingerprint ('' if unknown) and bonus text.
      */
-    function rowFingerprint(row, adapter) {
-        if (!adapter.getFingerprint) return '';
-        const fp = adapter.getFingerprint(row);
+    function rowItemInfo(row, adapter) {
+        const stats = adapter.getStats?.(row) ?? null;
+        const fp = stats ? Data.makeFingerprint(adapter.getName(row), stats) : '';
         if (fp) {
             row.dataset[DATA_FP] = fp;
-            return fp;
+            row.dataset[DATA_BONUS] = Data.formatBonuses(stats.bonuses);
         }
-        return row.dataset[DATA_FP] ?? '';
+        return { fp: row.dataset[DATA_FP] ?? '', bonuses: row.dataset[DATA_BONUS] ?? '' };
     }
 
     /**
@@ -3172,8 +3209,8 @@ ${colorRules}
         }
         if (!adapter.anyCategory && !TRACKED.has(adapter.getCategory(row))) return;
         if (adapter === FACTION_ADAPTER) SeenIds.add(id);
-        const fp = rowFingerprint(row, adapter);
-        if (adapter.backfill && fp) FingerprintSync.offer(id, fp);
+        const { fp, bonuses } = rowItemInfo(row, adapter);
+        if (adapter.backfill && fp) FingerprintSync.offer(id, fp, bonuses);
 
         for (const spec of adapter.mounts) {
             const host = spec.findHost(row);
@@ -3190,7 +3227,10 @@ ${colorRules}
             btn.dataset[DATA_SRC] = srcKind;
             btn.dataset[DATA_NAME] = adapter.getName(row);
             btn.dataset[DATA_ITEM] = adapter.getItemId(row);
-            if (fp) btn.dataset[DATA_FP] = fp;
+            if (fp) {
+                btn.dataset[DATA_FP] = fp;
+                btn.dataset[DATA_BONUS] = bonuses;
+            }
             renderNoteButton(btn);
         }
     }

@@ -16,7 +16,8 @@ CREATE TABLE IF NOT EXISTS notes (
     updated_by_name TEXT    NOT NULL DEFAULT '',
     deleted         INTEGER NOT NULL DEFAULT 0,
     fingerprint     TEXT    NOT NULL DEFAULT '',   -- item stats ("w|name|dmg|acc"), matches items with no ID on the page
-    changed_at      INTEGER NOT NULL DEFAULT 0     -- epoch ms of any change (sync marker); updated_at = last edit
+    changed_at      INTEGER NOT NULL DEFAULT 0,    -- epoch ms of any change (sync marker); updated_at = last edit
+    bonuses         TEXT    NOT NULL DEFAULT ''    -- readable bonus text, e.g. "22% Execute" (for the CSV export)
 );
 
 CREATE INDEX IF NOT EXISTS idx_notes_updated_at ON notes (updated_at);
