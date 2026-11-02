@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Armory Notes
 // @namespace    dadgum.torn.armorynotes
-// @version      2.1.1
+// @version      2.2.0
 // @description  Colored labels and notes on individual weapons and armor (keyed by armory ID). Private notes on the Items page; shared faction notes in the Faction Armory.
 // @author       DadGum
 // @license      MIT
@@ -42,12 +42,18 @@
  *   - item.php                       (rows view and thumbnail view)
  *   - factions.php#/tab=armoury      (Weapons and Armor tabs)
  *   - trade.php                      (trade view and add-items screen:
- *                                     faction notes on your own items,
- *                                     read-only)
+ *                                     faction notes, read-only; the other
+ *                                     person's items are matched by stats)
  *
  * Author: DadGum
  *
  * Changelog
+ *   2.2.0 (2026-11-01) Trade view: faction notes also show on the other
+ *                      person's items, matched by item stats ("fingerprint":
+ *                      name + damage + accuracy, or name + defence + bonus),
+ *                      because Torn shows no ID for their items. Editors'
+ *                      browsers record fingerprints from the armory and
+ *                      Items page.
  *   2.1.1 (2026-11-01) Trade add-items confirmation step ("Are you sure you
  *                      wish to add…") now shows faction notes too.
  *   2.1.0 (2026-11-01) Trade pages: faction notes show read-only on your own
@@ -183,6 +189,11 @@
         SEEN_MAX: 5000,
         SEEN_FLUSH_MS: 2000,
         EDITOR_NAME_MAX: 40,
+        /** Same rule as the server: "w|…" or "a|…", no control characters. */
+        FINGERPRINT_PATTERN: /^[wa]\|[^\u0000-\u001f]{3,248}$/,
+        /** Fingerprints sent per request, and the wait before sending a batch. */
+        FINGERPRINT_BATCH: 200,
+        FINGERPRINT_FLUSH_MS: 3000,
 
         /**
          * Torn API error codes (ApiError schema, Torn API v2). The server passes
@@ -282,6 +293,11 @@
             TRADE_VIEW_ROW: '.trade-cont .user .cont > li ul.desc > li',
             TRADE_VIEW_REMOVE: ':scope > .del a[href*="armoryID="]',
             TRADE_VIEW_NAME: ':scope > .name',
+            // Item stats, used for fingerprints. The trade view keeps them in
+            // the info icon's title (HTML text, parsed as a string, never rendered).
+            TRADE_VIEW_INFO: ':scope > .name i.networth-info-icon',
+            ITEMS_STATS: ':scope .bonuses-wrap',
+            FACTION_STATS: ':scope > ul.bonuses',
         }),
     });
 
@@ -341,6 +357,7 @@
     const DATA_KIND = 'tmsAnKind';
     const DATA_SIG = 'tmsAnSig';
     const DATA_SRC = 'tmsAnSrc'; // 'local' | 'shared'
+    const DATA_FP = 'tmsAnFp';   // item stat fingerprint (on buttons and rows)
     const TORN_TRANSIENT = new Set(CONFIG.TORN_TRANSIENT_CODES);
 
     /**
@@ -375,8 +392,18 @@
      */
 
     /**
-     * A faction (shared) note: a Note plus who last changed it.
-     * @typedef {Note & {updatedById: number, updatedByName: string}} SharedNote
+     * A faction (shared) note: a Note plus who last changed it and the item's
+     * stat fingerprint ('' until an editor's browser has seen the item).
+     * @typedef {Note & {updatedById: number, updatedByName: string, fingerprint: string}} SharedNote
+     */
+
+    /**
+     * Stats read from an item row or tooltip.
+     * @typedef {Object} ItemStats
+     * @property {number|null} damage
+     * @property {number|null} accuracy
+     * @property {number|null} defence
+     * @property {{name: string, value: string}[]} bonuses
      */
 
     /**
@@ -388,7 +415,9 @@
      * @property {string} text
      * @property {string} itemName
      * @property {string} itemId
-     * @property {number} updated        - Server epoch ms.
+     * @property {number} updated        - Server epoch ms of the last edit.
+     * @property {number} [changed]      - Server epoch ms of any change (sync marker).
+     * @property {string} [fingerprint]  - Item stat fingerprint.
      * @property {number} updatedById
      * @property {string} updatedByName
      * @property {boolean} deleted       - Tombstone (note was deleted).
@@ -442,6 +471,11 @@
      * @property {(row: Element) => string} getItemId             - Item type ID.
      * @property {(row: Element) => string} getName               - Item display name.
      * @property {MountSpec[]} mounts                             - Button mount points.
+     * @property {(row: Element) => string} [getFingerprint]      - Item stat fingerprint ('' if none).
+     * @property {(row: Element) => boolean} [accepts]            - Row filter applied before getId.
+     * @property {boolean} [dynamicIds]                           - IDs come from fingerprints; rows are
+     *   rescanned when faction notes change and buttons removed when no note matches.
+     * @property {boolean} [backfill]                             - Editors record fingerprints from this page.
      * @property {boolean} [anyCategory]                          - Skip the category filter
      *   (pages that only show existing faction notes).
      */
@@ -669,25 +703,30 @@
         /**
          * Sanitize a note from the server (or the local faction-note cache).
          * @param {unknown} raw - Candidate ServerNote.
-         * @returns {{id: string, updated: number, note: (SharedNote|null)}|null}
-         *   null if unusable; note is null for a deletion (tombstone).
+         * @returns {{id: string, updated: number, changed: number, note: (SharedNote|null)}|null}
+         *   null if unusable; note is null for a deletion (tombstone). `changed`
+         *   is the sync marker (falls back to `updated` for older servers).
          */
         normalizeSharedNote(raw) {
             if (!raw || typeof raw !== 'object') return null;
             const id = String(raw.armoryId ?? '');
             const updated = Number(raw.updated);
             if (!Data.isValidArmoryId(id) || !Number.isFinite(updated) || updated <= 0) return null;
-            if (raw.deleted) return { id, updated, note: null };
+            const changedRaw = Number(raw.changed);
+            const changed = Number.isFinite(changedRaw) && changedRaw > 0 ? changedRaw : updated;
+            if (raw.deleted) return { id, updated, changed, note: null };
             const base = Data.normalizeNote({ ...raw, updated });
-            if (!base) return { id, updated, note: null };
+            if (!base) return { id, updated, changed, note: null };
             const byId = Number(raw.updatedById);
             return {
                 id,
                 updated,
+                changed,
                 note: {
                     ...base,
                     updatedById: Number.isInteger(byId) && byId > 0 ? byId : 0,
                     updatedByName: String(raw.updatedByName ?? '').slice(0, CONFIG.EDITOR_NAME_MAX),
+                    fingerprint: Data.isFingerprint(raw.fingerprint) ? raw.fingerprint : '',
                 },
             };
         },
@@ -758,6 +797,72 @@
             }
             if (current.length) chunks.push(current);
             return chunks;
+        },
+
+        /**
+         * Whether a value is a well-formed fingerprint.
+         * @param {unknown} fp - Candidate.
+         * @returns {boolean} True if valid.
+         */
+        isFingerprint(fp) {
+            return typeof fp === 'string' && CONFIG.FINGERPRINT_PATTERN.test(fp);
+        },
+
+        /**
+         * Parse bonus name(s) and value(s) from Torn's bonus tooltip HTML, e.g.
+         * "<b>Impenetrable</b><br/>20% decreased incoming bullet damage".
+         * Plain string parsing: the HTML is never rendered.
+         * @param {string} html - Tooltip HTML text.
+         * @returns {{name: string, value: string}[]} Bonuses (value '' if no %).
+         */
+        parseBonuses(html) {
+            const out = [];
+            const re = /<b>([^<]{1,40})<\/b>\s*<br\s*\/?>([^<]*)/gi;
+            let m;
+            while ((m = re.exec(String(html ?? '')))) {
+                const pct = /(\d+(?:\.\d+)?)\s*%/.exec(m[2]);
+                out.push({ name: m[1].trim(), value: pct ? pct[1] : '' });
+            }
+            return out;
+        },
+
+        /**
+         * Read stats from the trade view's info-icon tooltip HTML (string only).
+         * @param {string} html - Tooltip HTML text.
+         * @returns {ItemStats} Stats.
+         */
+        statsFromTooltip(html) {
+            const text = String(html ?? '');
+            const stat = (kind) => {
+                const m = new RegExp(`bonus-attachment-item-${kind}-bonus['"][^>]*>\\s*</i>\\s*<span>\\s*([\\d.]+)\\s*</span>`, 'i').exec(text);
+                return m ? Number(m[1]) : null;
+            };
+            return { damage: stat('damage'), accuracy: stat('accuracy'), defence: stat('defence'), bonuses: Data.parseBonuses(text) };
+        },
+
+        /**
+         * Build an item fingerprint. Weapons: name + damage + accuracy (mods do
+         * not change these). Armor: name + defence + bonuses (defence alone is
+         * less unique). Two decimals, lower-case name.
+         * @param {string} name - Item name.
+         * @param {ItemStats} stats - Item stats.
+         * @returns {string} Fingerprint, or '' if the stats are incomplete.
+         */
+        makeFingerprint(name, stats) {
+            const n = String(name ?? '').trim().replace(/\s+/g, ' ').toLowerCase().replace(/\|/g, '/');
+            const fix = (v) => (Number.isFinite(v) ? v.toFixed(2) : null);
+            if (!n || !stats) return '';
+            let fp = '';
+            if (fix(stats.damage) && fix(stats.accuracy)) {
+                fp = `w|${n}|${fix(stats.damage)}|${fix(stats.accuracy)}`;
+            } else if (fix(stats.defence)) {
+                const bonuses = (stats.bonuses ?? [])
+                    .map((b) => `${String(b.name).toLowerCase().replace(/[|,:]/g, '')}:${b.value}`)
+                    .sort()
+                    .join(',');
+                fp = `a|${n}|${fix(stats.defence)}|${bonuses}`;
+            }
+            return Data.isFingerprint(fp) ? fp : '';
         },
 
         /**
@@ -1017,6 +1122,8 @@
         _inflight: null,
         /** Bumped on every reset so a refresh started before it is discarded. */
         _gen: 0,
+        /** @type {Map<string, string|null>|null} fingerprint -> armory ID (null if ambiguous). */
+        _fpIndex: null,
 
         /**
          * Load the cache for the configured server (discarded if for another server).
@@ -1045,6 +1152,7 @@
         _reset(serverUrl) {
             this._gen += 1;
             this._inflight = null;
+            this._fpIndex = null;
             this._notes = {};
             this._since = 0;
             this._fetchedAt = 0;
@@ -1112,18 +1220,49 @@
             for (const raw of list) {
                 const n = Data.normalizeSharedNote(raw);
                 if (!n) continue;
-                if (advanceSince) this._since = Math.max(this._since, n.updated);
+                if (advanceSince && Number.isFinite(n.changed)) this._since = Math.max(this._since, n.changed);
                 const prev = this._notes[n.id];
                 if (!n.note) {
                     if (prev) {
                         delete this._notes[n.id];
                         changed.push(n.id);
                     }
-                } else if (!prev || Data.noteSignature(prev) !== Data.noteSignature(n.note) || prev.updatedById !== n.note.updatedById) {
+                } else if (!prev || Data.noteSignature(prev) !== Data.noteSignature(n.note)
+                    || prev.updatedById !== n.note.updatedById || prev.fingerprint !== n.note.fingerprint) {
                     this._notes[n.id] = n.note;
                     changed.push(n.id);
                 }
             }
+            if (changed.length) this._fpIndex = null;
+            return changed;
+        },
+
+        /**
+         * Armory ID of the faction note whose item has this fingerprint.
+         * @param {string} fp - Fingerprint.
+         * @returns {string|undefined} Armory ID, or undefined if none or more than one.
+         */
+        idByFingerprint(fp) {
+            if (!fp) return undefined;
+            if (!this._fpIndex) {
+                this._fpIndex = new Map();
+                for (const [id, note] of Object.entries(this._notes)) {
+                    if (!note.fingerprint) continue;
+                    // Two notes with identical stats: refuse to guess.
+                    this._fpIndex.set(note.fingerprint, this._fpIndex.has(note.fingerprint) ? null : id);
+                }
+            }
+            return this._fpIndex.get(fp) ?? undefined;
+        },
+
+        /**
+         * Apply server notes from an editor action (no poll marker change) and save.
+         * @param {unknown[]} list - ServerNote objects.
+         * @returns {string[]} Changed IDs.
+         */
+        applyOwn(list) {
+            const changed = this.apply(list, { advanceSince: false });
+            if (changed.length) this._persist();
             return changed;
         },
 
@@ -1178,8 +1317,7 @@
          */
         async save(id, fields) {
             const data = await Server.request('PUT', `/notes/${encodeURIComponent(id)}`, { body: fields });
-            this.apply([data?.note], { advanceSince: false });
-            this._persist();
+            this.applyOwn([data?.note]);
         },
 
         /**
@@ -1190,8 +1328,7 @@
          */
         async remove(id) {
             const data = await Server.request('DELETE', `/notes/${encodeURIComponent(id)}`);
-            this.apply([data?.note ?? { armoryId: id, deleted: true, updated: Date.now() }], { advanceSince: false });
-            this._persist();
+            this.applyOwn([data?.note ?? { armoryId: id, deleted: true, updated: Date.now() }]);
         },
 
         /**
@@ -1261,6 +1398,53 @@
          */
         has(id) {
             return this._load().has(id);
+        },
+    };
+
+    /* ---- Fingerprint backfill (editors only) ------------------------------- */
+    // When an editor's browser shows a noted item with stats, its fingerprint
+    // is sent so everyone can match the item on trade pages, where Torn shows
+    // no ID for the other person's items. Batched, and each ID/fingerprint pair
+    // is sent at most once per page load.
+
+    const FingerprintSync = {
+        /** @type {Map<string, string>} */
+        _queue: new Map(),
+        /** @type {Map<string, string>} */
+        _sent: new Map(),
+        _timer: 0,
+
+        /**
+         * Queue a fingerprint for a noted item (no-op unless needed).
+         * @param {string} id - Armory ID.
+         * @param {string} fp - Fingerprint.
+         * @returns {void}
+         */
+        offer(id, fp) {
+            if (!Data.isFingerprint(fp) || !Shared.isActive() || !Shared.canEdit()) return;
+            const note = SharedStore.get(id);
+            if (!note || note.fingerprint === fp || this._sent.get(id) === fp) return;
+            this._queue.set(id, fp);
+            clearTimeout(this._timer);
+            this._timer = setTimeout(() => {
+                this.flush().catch((err) => handleSharedError('Faction notes', err, { quiet: true }));
+            }, CONFIG.FINGERPRINT_FLUSH_MS);
+        },
+
+        /**
+         * Send queued fingerprints.
+         * @returns {Promise<void>}
+         * @throws {ServerError} On failure.
+         */
+        async flush() {
+            const items = [...this._queue].map(([armoryId, fingerprint]) => ({ armoryId, fingerprint }));
+            this._queue.clear();
+            for (const { armoryId, fingerprint } of items) this._sent.set(armoryId, fingerprint);
+            for (let i = 0; i < items.length; i += CONFIG.FINGERPRINT_BATCH) {
+                const data = await Server.request('POST', '/notes/fingerprints', { body: { items: items.slice(i, i + CONFIG.FINGERPRINT_BATCH) } });
+                if (Array.isArray(data?.notes) && SharedStore.applyOwn(data.notes).length) rescanDynamic();
+                log(`Recorded ${data?.updated ?? 0} fingerprint(s)`);
+            }
         },
     };
 
@@ -1647,6 +1831,7 @@
                 this._lastError = '';
                 if (stateChanged()) rerenderAll();
                 else changed.forEach((id) => refreshId(id));
+                if (changed.length) rescanDynamic();
                 return true;
             } catch (err) {
                 handleSharedError('Faction notes', err, { quiet });
@@ -2189,6 +2374,19 @@ ${colorRules}
         refreshAll();
     }
 
+    /**
+     * After faction notes or fingerprints change, re-decorate rows that depend
+     * on them: rows matched by fingerprint (the other person's trade items),
+     * and rows that record fingerprints (a note may have just arrived).
+     * Unchanged buttons are skipped by their signature, so this is cheap.
+     * @returns {void}
+     */
+    function rescanDynamic() {
+        Watchers.forEach((w) => {
+            if (w.adapter.dynamicIds || w.adapter.backfill) w.scan();
+        });
+    }
+
     /* ---- Editor popover --------------------------------------------------- */
 
     const Editor = {
@@ -2308,7 +2506,9 @@ ${colorRules}
                 if (!label && !text.trim()) {
                     if (existing) await src.remove(id);
                 } else {
-                    await src.save(id, { label, color, text, itemName: name, itemId });
+                    const fields = { label, color, text, itemName: name, itemId };
+                    if (shared && Data.isFingerprint(btn.dataset[DATA_FP])) fields.fingerprint = btn.dataset[DATA_FP];
+                    await src.save(id, fields);
                 }
             }, 'Could not save note', 'Saving…');
             const remove = () => run(() => src.remove(id), 'Could not delete note', 'Deleting…');
@@ -2774,6 +2974,8 @@ ${colorRules}
         getCategory: (row) => row.dataset.category,
         getItemId: (row) => row.dataset.item ?? '',
         getName: (row) => ownText(row.querySelector(`${CONFIG.SEL.ITEMS_NAME_WRAP} ${CONFIG.SEL.ITEMS_NAME}`)),
+        getFingerprint: (row) => Data.makeFingerprint(ITEMS_ADAPTER.getName(row), statsFromIcons(row.querySelector(CONFIG.SEL.ITEMS_STATS))),
+        backfill: true,
         mounts: [
             {
                 kind: 'pill',
@@ -2817,6 +3019,8 @@ ${colorRules}
         getCategory: (row) => row.querySelector(CONFIG.SEL.FACTION_TYPE)?.textContent.trim(),
         getItemId: (row) => row.querySelector(CONFIG.SEL.FACTION_ID_HOLDER)?.dataset.itemid ?? '',
         getName: (row) => ownText(row.querySelector(CONFIG.SEL.FACTION_NAME)),
+        getFingerprint: (row) => Data.makeFingerprint(FACTION_ADAPTER.getName(row), statsFromIcons(row.querySelector(CONFIG.SEL.FACTION_STATS))),
+        backfill: true,
         mounts: [
             {
                 kind: 'faction',
@@ -2864,6 +3068,8 @@ ${colorRules}
         getCategory: () => '',
         getItemId: (row) => /[?&#]itemID=(\d{1,10})/.exec(row.querySelector(CONFIG.SEL.TRADE_VIEW_REMOVE)?.getAttribute('href') ?? '')?.[1] ?? '',
         getName: (row) => ownText(row.querySelector(CONFIG.SEL.TRADE_VIEW_NAME)),
+        getFingerprint: (row) => tradeRowFingerprint(row),
+        backfill: true,
         mounts: [
             {
                 kind: 'trade',
@@ -2880,6 +3086,72 @@ ${colorRules}
     };
 
     /**
+     * Read stats from a row's stat icons (armory, Items page). Bonus names and
+     * values come from the icons' title text, parsed as a string.
+     * @param {Element|null} container - Element holding the stat list.
+     * @returns {ItemStats|null} Stats, or null if no container.
+     */
+    function statsFromIcons(container) {
+        if (!container) return null;
+        const stat = (kind) => {
+            const icon = container.querySelector(`i[class*="bonus-attachment-item-${kind}-bonus"]`);
+            const value = icon?.parentElement?.querySelector('span')?.textContent.trim();
+            return value && /^\d+(\.\d+)?$/.test(value) ? Number(value) : null;
+        };
+        const bonuses = [];
+        container.querySelectorAll('i[title][class*="bonus-attachment-"]').forEach((icon) => {
+            if (/bonus-attachment-(item-|blank-)/.test(icon.className)) return;
+            bonuses.push(...Data.parseBonuses(icon.getAttribute('title')));
+        });
+        return { damage: stat('damage'), accuracy: stat('accuracy'), defence: stat('defence'), bonuses };
+    }
+
+    /**
+     * Fingerprint of a trade-view row, from its info icon's tooltip text.
+     * @param {Element} row - Trade row.
+     * @returns {string} Fingerprint or ''.
+     */
+    function tradeRowFingerprint(row) {
+        const html = row.querySelector(CONFIG.SEL.TRADE_VIEW_INFO)?.getAttribute('title') ?? '';
+        return Data.makeFingerprint(ownText(row.querySelector(CONFIG.SEL.TRADE_VIEW_NAME)), Data.statsFromTooltip(html));
+    }
+
+    /**
+     * Trade view, the other person's items: no armory ID on the page, so the
+     * faction note is found by the item's stat fingerprint. @type {PageAdapter}
+     */
+    const TRADE_PARTNER_ADAPTER = {
+        name: 'trade-partner',
+        rowSelector: CONFIG.SEL.TRADE_VIEW_ROW,
+        anyCategory: true,
+        dynamicIds: true,
+        accepts: (row) => !row.querySelector(CONFIG.SEL.TRADE_VIEW_REMOVE), // your rows are handled by ID
+        getFingerprint: tradeRowFingerprint,
+        getId: (row) => SharedStore.idByFingerprint(rowFingerprint(row, TRADE_PARTNER_ADAPTER)),
+        getCategory: () => '',
+        getItemId: () => '',
+        getName: (row) => ownText(row.querySelector(CONFIG.SEL.TRADE_VIEW_NAME)),
+        mounts: TRADE_VIEW_ADAPTER.mounts,
+    };
+
+    /**
+     * A row's fingerprint, remembered on the row: Torn's tooltip code may
+     * blank the title while it is hovered.
+     * @param {Element} row - Item row.
+     * @param {PageAdapter} adapter - Page adapter.
+     * @returns {string} Fingerprint or ''.
+     */
+    function rowFingerprint(row, adapter) {
+        if (!adapter.getFingerprint) return '';
+        const fp = adapter.getFingerprint(row);
+        if (fp) {
+            row.dataset[DATA_FP] = fp;
+            return fp;
+        }
+        return row.dataset[DATA_FP] ?? '';
+    }
+
+    /**
      * Add or refresh note buttons on one row. Idempotent: unchanged buttons
      * are left alone so our own DOM writes do not retrigger observers.
      * @param {Element} row - Candidate item row.
@@ -2887,10 +3159,21 @@ ${colorRules}
      * @returns {void}
      */
     function decorateRow(row, adapter) {
+        if (adapter.accepts && !adapter.accepts(row)) return;
         const id = adapter.getId(row);
-        if (!Data.isValidArmoryId(id)) return;
+        if (!Data.isValidArmoryId(id)) {
+            // A fingerprint match that went away: remove its button.
+            if (adapter.dynamicIds) {
+                for (const spec of adapter.mounts) {
+                    spec.findHost(row)?.querySelector(`:scope > .${CLS.btn}[data-tms-an-kind="${spec.kind}"]`)?.remove();
+                }
+            }
+            return;
+        }
         if (!adapter.anyCategory && !TRACKED.has(adapter.getCategory(row))) return;
         if (adapter === FACTION_ADAPTER) SeenIds.add(id);
+        const fp = rowFingerprint(row, adapter);
+        if (adapter.backfill && fp) FingerprintSync.offer(id, fp);
 
         for (const spec of adapter.mounts) {
             const host = spec.findHost(row);
@@ -2907,6 +3190,7 @@ ${colorRules}
             btn.dataset[DATA_SRC] = srcKind;
             btn.dataset[DATA_NAME] = adapter.getName(row);
             btn.dataset[DATA_ITEM] = adapter.getItemId(row);
+            if (fp) btn.dataset[DATA_FP] = fp;
             renderNoteButton(btn);
         }
     }
@@ -3147,9 +3431,11 @@ ${colorRules}
             if (token !== syncToken || !root) return;
             addWatcher.attach(root);
             viewWatcher.attach(root);
+            partnerWatcher.attach(root);
         };
         const addWatcher = new RootWatcher(TRADE_ADD_ADAPTER, () => sync());
         const viewWatcher = new RootWatcher(TRADE_VIEW_ADAPTER);
+        const partnerWatcher = new RootWatcher(TRADE_PARTNER_ADAPTER);
         window.addEventListener('hashchange', () => {
             Tooltip.hide();
             sync();

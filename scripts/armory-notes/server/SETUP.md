@@ -88,6 +88,16 @@ This also confirms that Torn's API answers requests from Cloudflare. If sign-in 
 
 Then use **Tampermonkey menu > Upload local notes to faction** to move your existing notes over.
 
+## Updating an existing server
+
+Some releases change the database. Run each new file in [`migrations/`](migrations/) once, in order, in the D1 **Console** (paste and Execute), **before** pushing the release:
+
+| File | Release | What it does |
+|---|---|---|
+| `0001_fingerprint.sql` | 2.2.0 | Adds item fingerprints (for matching the other person's trade items) and a separate sync marker |
+
+New databases created from `schema.sql` already include every migration.
+
 ## Day-to-day
 
 | Task | How |

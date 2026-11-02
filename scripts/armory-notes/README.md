@@ -14,7 +14,7 @@ Attach a colored label and a note to individual weapons and armor. Notes are tie
 - The label shows as a colored pill; hover it to read the full note
 - **Faction Armory:** shared faction notes, refreshed every 45 seconds while the tab is visible. Hover shows who edited a note last and when.
 - **Items page:** your private notes (row and thumbnail views), plus a faction pill (with a people icon) when an item has a faction note. Editors can click it to edit or delete the faction note, which is handy for items in your own inventory; everyone else sees it read-only.
-- **Trade pages:** faction notes show read-only on your own items, in the trade view, on the add-items screen and on its confirmation step, so you can see a faction-owned item before you send it
+- **Trade pages:** faction notes show read-only on your own items, in the trade view, on the add-items screen and on its confirmation step, and on **the other person's items** in the trade view (matched by the item's stats), so you can see a faction-owned item before you send it
 - Upload your existing local notes to the faction in one step
 - Label autocomplete, plus backup and restore of local notes
 
@@ -80,7 +80,7 @@ That is about **1 Torn API call per 12 hours**, and about **1.3 server requests 
 
 ## Known limitations
 
-- Trade pages show notes only on **your own** items. Torn's trade page doesn't include an item ID for the other person's items, so their side can't be matched.
+- On the other person's side of a trade, Torn shows no item ID, so notes are matched by **stats**: name + damage + accuracy for weapons, name + defence + bonus for armor. An item is only matched after an editor has seen it with the script (in the armory, on their Items page or in their own trade) since its note was added. If two noted items have identical stats, neither is shown rather than guessing.
 - On the trade add-items screen, the item ID is read from an internal React attribute (`data-reactid`). If Torn updates its page framework, notes stop showing there until the script is updated; everything else keeps working.
 - On the Items page, faction notes show in row view only, not thumbnail view.
 - Edits are last-write-wins. If two editors change the same note at once, the later save wins; both changes are in the server's history.
@@ -91,6 +91,7 @@ That is about **1 Torn API call per 12 hours**, and about **1.3 server requests 
 
 ## Changelog
 
+- **2.2.0**: Trade view shows faction notes on the other person's items too, matched by item stats ("fingerprint"), since Torn shows no ID for them. Editors' browsers record fingerprints automatically from the armory, Items page and their own trades. Needs the server update in this release and the `migrations/0001_fingerprint.sql` database change (see SETUP.md).
 - **2.1.1**: Trade add-items confirmation step ("Are you sure you wish to add…") now shows faction notes too.
 - **2.1.0**: Trade pages. Faction notes show read-only (for everyone, editors included) on your own items in the trade view and on the add-items screen. No polling there: at most one refresh per page load.
 - **2.0.2**: Fixes: saving a faction note no longer hides another editor's change made moments earlier; without a key, or outside the faction, the Faction Armory falls back to private notes instead of showing nothing; clearing the cache during a refresh no longer loses notes; an upload that fails partway reports what was moved; uploads are split by size; refreshes only redraw notes that changed. The server rejects oversized requests before reading them.

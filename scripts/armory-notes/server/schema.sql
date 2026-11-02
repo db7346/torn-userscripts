@@ -14,10 +14,13 @@ CREATE TABLE IF NOT EXISTS notes (
     updated_at      INTEGER NOT NULL,              -- epoch ms, set by the server
     updated_by_id   INTEGER NOT NULL,              -- Torn player ID of the editor
     updated_by_name TEXT    NOT NULL DEFAULT '',
-    deleted         INTEGER NOT NULL DEFAULT 0
+    deleted         INTEGER NOT NULL DEFAULT 0,
+    fingerprint     TEXT    NOT NULL DEFAULT '',   -- item stats ("w|name|dmg|acc"), matches items with no ID on the page
+    changed_at      INTEGER NOT NULL DEFAULT 0     -- epoch ms of any change (sync marker); updated_at = last edit
 );
 
 CREATE INDEX IF NOT EXISTS idx_notes_updated_at ON notes (updated_at);
+CREATE INDEX IF NOT EXISTS idx_notes_changed_at ON notes (changed_at);
 
 -- Append-only change log (every create / update / delete / import).
 -- Not shown in the script yet; kept so history and revert can be added later.

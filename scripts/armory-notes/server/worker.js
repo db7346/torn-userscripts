@@ -7,6 +7,11 @@
  *   PUT    /notes/:armoryId      editors: create/update one note
  *   DELETE /notes/:armoryId      editors: delete one note
  *   POST   /notes/import         editors: bulk upload { notes: [...] } (never overwrites)
+ *   POST   /notes/fingerprints   editors: record item stat fingerprints
+ *                                { items: [{ armoryId, fingerprint }] }
+ *
+ * Sync: clients poll with ?since=<changed>. `changed_at` moves on every change
+ * (including fingerprint updates); `updated_at` is the last edit shown to users.
  *
  * Identity: the member's PUBLIC Torn API key is sent to POST /auth only. The
  * Worker calls GET https://api.torn.com/v2/user?selections=basic,faction once,
@@ -37,6 +42,9 @@ const CONFIG = Object.freeze({
     NAME_MAX: 100,
     COLORS: Object.freeze(['red', 'orange', 'yellow', 'green', 'teal', 'blue', 'purple', 'gray']),
     ARMORY_ID_PATTERN: /^\d{1,20}$/,
+    /** "w|name|damage|accuracy" or "a|name|defence|bonuses"; no control characters. */
+    FINGERPRINT_PATTERN: /^[wa]\|[^\u0000-\u001f]{3,248}$/,
+    MAX_FINGERPRINTS: 500,
     API_KEY_PATTERN: /^[A-Za-z0-9]{16}$/,
 });
 
@@ -254,7 +262,8 @@ function armoryId(id) {
 /**
  * Sanitize a note body.
  * @param {unknown} raw - Candidate note.
- * @returns {{label: string, color: string, text: string, itemName: string, itemId: string}} Clean note.
+ * @returns {{label: string, color: string, text: string, itemName: string, itemId: string, fingerprint: (string|null)}}
+ *   Clean note. fingerprint is null when not sent (keep the stored one).
  * @throws {HttpError} 400 if empty or invalid.
  */
 function cleanNote(raw) {
@@ -265,7 +274,16 @@ function cleanNote(raw) {
     const color = CONFIG.COLORS.includes(raw.color) ? raw.color : 'blue';
     const itemName = String(raw.itemName ?? '').slice(0, CONFIG.NAME_MAX);
     const itemId = /^\d{1,10}$/.test(String(raw.itemId ?? '')) ? String(raw.itemId) : '';
-    return { label, color, text, itemName, itemId };
+    return { label, color, text, itemName, itemId, fingerprint: cleanFingerprint(raw.fingerprint) };
+}
+
+/**
+ * Validate an optional item fingerprint.
+ * @param {unknown} fp - Candidate.
+ * @returns {string|null} The fingerprint, or null if missing or invalid.
+ */
+function cleanFingerprint(fp) {
+    return typeof fp === 'string' && CONFIG.FINGERPRINT_PATTERN.test(fp) ? fp : null;
 }
 
 /**
@@ -282,6 +300,8 @@ function rowToNote(row) {
         itemName: row.item_name,
         itemId: row.item_id,
         updated: row.updated_at,
+        changed: row.changed_at || row.updated_at,
+        fingerprint: row.fingerprint ?? '',
         updatedById: row.updated_by_id,
         updatedByName: row.updated_by_name,
         deleted: row.deleted === 1,
@@ -347,8 +367,8 @@ async function handleList(request, url, cfg) {
     const since = Math.max(0, Number(url.searchParams.get('since')) || 0);
     // A full load (since=0) skips tombstones; incremental loads include them.
     const sql = since === 0
-        ? 'SELECT * FROM notes WHERE deleted = 0 ORDER BY updated_at LIMIT ?2'
-        : 'SELECT * FROM notes WHERE updated_at >= ?1 ORDER BY updated_at LIMIT ?2';
+        ? 'SELECT * FROM notes WHERE deleted = 0 ORDER BY changed_at LIMIT ?2'
+        : 'SELECT * FROM notes WHERE changed_at >= ?1 ORDER BY changed_at LIMIT ?2';
     const { results } = await cfg.db.prepare(sql).bind(since, CONFIG.MAX_RESULTS).all();
     return json(request, 200, {
         serverTime: Date.now(),
@@ -369,15 +389,17 @@ async function handleList(request, url, cfg) {
  */
 function upsertStmt(db, id, n, user, now) {
     return db.prepare(
-        `INSERT INTO notes (armory_id, label, color, text, item_name, item_id, updated_at, updated_by_id, updated_by_name, deleted)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0)
+        `INSERT INTO notes (armory_id, label, color, text, item_name, item_id, updated_at, updated_by_id, updated_by_name,
+                            deleted, fingerprint, changed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, COALESCE(?10, ''), ?7)
          ON CONFLICT(armory_id) DO UPDATE SET
            label = excluded.label, color = excluded.color, text = excluded.text,
            item_name = CASE WHEN excluded.item_name <> '' THEN excluded.item_name ELSE notes.item_name END,
            item_id = CASE WHEN excluded.item_id <> '' THEN excluded.item_id ELSE notes.item_id END,
-           updated_at = excluded.updated_at, updated_by_id = excluded.updated_by_id,
+           fingerprint = COALESCE(?10, notes.fingerprint),
+           updated_at = excluded.updated_at, changed_at = excluded.changed_at, updated_by_id = excluded.updated_by_id,
            updated_by_name = excluded.updated_by_name, deleted = 0`,
-    ).bind(id, n.label, n.color, n.text, n.itemName, n.itemId, now, user.pid, user.name);
+    ).bind(id, n.label, n.color, n.text, n.itemName, n.itemId, now, user.pid, user.name, n.fingerprint ?? null);
 }
 
 /**
@@ -428,7 +450,8 @@ async function handleDelete(request, rawId, cfg) {
     const now = Date.now();
     await cfg.db.batch([
         cfg.db.prepare(
-            `UPDATE notes SET deleted = 1, label = '', text = '', updated_at = ?2, updated_by_id = ?3, updated_by_name = ?4
+            `UPDATE notes SET deleted = 1, label = '', text = '', fingerprint = '', updated_at = ?2, changed_at = ?2,
+                    updated_by_id = ?3, updated_by_name = ?4
              WHERE armory_id = ?1`,
         ).bind(id, now, user.pid, user.name),
         logStmt(cfg.db, id, 'delete', null, user, now),
@@ -489,6 +512,57 @@ async function handleImport(request, cfg) {
     return json(request, 200, { added, skipped: [...existing], invalid });
 }
 
+/**
+ * POST /notes/fingerprints - record item stat fingerprints (editors).
+ * Only live notes are touched, and only when the fingerprint differs. Moves
+ * `changed_at` so other members' polls pick it up, but not `updated_at` or the
+ * editor name (this is not an edit of the note).
+ * @param {Request} request - Request.
+ * @param {ReturnType<typeof settings>} cfg - Settings.
+ * @returns {Promise<Response>} Response with the changed notes.
+ */
+async function handleFingerprints(request, cfg) {
+    const user = await requireUser(request, cfg);
+    requireEditor(user, cfg);
+    const body = await readJson(request);
+    const list = Array.isArray(body?.items) ? body.items : null;
+    if (!list) throw new HttpError(400, 'bad_fingerprints', 'Expected { items: [...] }.');
+    if (list.length > CONFIG.MAX_FINGERPRINTS) throw new HttpError(413, 'too_many', `At most ${CONFIG.MAX_FINGERPRINTS} items per request.`);
+
+    const updates = new Map();
+    for (const raw of list) {
+        const fp = cleanFingerprint(raw?.fingerprint);
+        const id = String(raw?.armoryId ?? '');
+        if (fp && CONFIG.ARMORY_ID_PATTERN.test(id)) updates.set(id, fp);
+    }
+    // Only notes that exist, are live and have a different fingerprint change.
+    const ids = [...updates.keys()];
+    const toChange = [];
+    for (let i = 0; i < ids.length; i += 90) {
+        const chunk = ids.slice(i, i + 90);
+        const marks = chunk.map((_, j) => `?${j + 1}`).join(',');
+        const { results } = await cfg.db
+            .prepare(`SELECT armory_id, fingerprint FROM notes WHERE deleted = 0 AND armory_id IN (${marks})`)
+            .bind(...chunk)
+            .all();
+        for (const r of results ?? []) if (r.fingerprint !== updates.get(r.armory_id)) toChange.push(r.armory_id);
+    }
+    const now = Date.now();
+    const stmts = toChange.map((id) => cfg.db.prepare(
+        'UPDATE notes SET fingerprint = ?2, changed_at = ?3 WHERE armory_id = ?1 AND deleted = 0',
+    ).bind(id, updates.get(id), now));
+    for (let i = 0; i < stmts.length; i += 100) await cfg.db.batch(stmts.slice(i, i + 100));
+
+    const notes = [];
+    for (let i = 0; i < toChange.length; i += 90) {
+        const chunk = toChange.slice(i, i + 90);
+        const marks = chunk.map((_, j) => `?${j + 1}`).join(',');
+        const { results } = await cfg.db.prepare(`SELECT * FROM notes WHERE armory_id IN (${marks})`).bind(...chunk).all();
+        notes.push(...(results ?? []).map(rowToNote));
+    }
+    return json(request, 200, { updated: notes.length, notes });
+}
+
 /* ===========================================================================
  * Router
  * ======================================================================== */
@@ -516,6 +590,7 @@ export default {
             if (path === '/auth' && request.method === 'POST') return await handleAuth(request, cfg);
             if (path === '/notes' && request.method === 'GET') return await handleList(request, url, cfg);
             if (path === '/notes/import' && request.method === 'POST') return await handleImport(request, cfg);
+            if (path === '/notes/fingerprints' && request.method === 'POST') return await handleFingerprints(request, cfg);
             const m = path.match(/^\/notes\/([^/]+)$/);
             if (m && request.method === 'PUT') return await handlePut(request, m[1], cfg);
             if (m && request.method === 'DELETE') return await handleDelete(request, m[1], cfg);
