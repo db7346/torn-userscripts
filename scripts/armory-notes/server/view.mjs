@@ -71,6 +71,13 @@ thead th{position:sticky;top:0;background:var(--bg);color:var(--green);font-size
 thead th[aria-sort=ascending]::after{content:" \\25B2";font-size:9px}
 thead th[aria-sort=descending]::after{content:" \\25BC";font-size:9px}
 thead th.num,td.num{text-align:right}
+thead th[draggable=true]{cursor:grab}
+thead th.dragging{opacity:.4}
+thead th.drop-l{box-shadow:inset 3px 0 0 var(--gold)}
+thead th.drop-r{box-shadow:inset -3px 0 0 var(--gold)}
+.btn{background:var(--bg);color:var(--dim);border:1px solid var(--line);border-radius:6px;padding:6px 10px;font:inherit;font-size:13px;cursor:pointer}
+.btn:hover:not(:disabled){color:var(--text);border-color:var(--dim)}
+.btn:disabled{opacity:.45;cursor:default}
 tbody tr.main{cursor:pointer}
 tbody tr.main.a{background:var(--row1)}
 tbody tr.main.b{background:var(--row2)}
@@ -122,6 +129,7 @@ tr.detail td{background:#0f141a;border-bottom:1px solid var(--line);padding:10px
   <select id="src" aria-label="Status"><option value="">Any status</option><option value="in">In armory</option><option value="loaned">Loaned out</option><option value="traded">Traded</option><option value="returned">Returned, not deposited</option><option value="missing">Missing</option><option value="out">Not in armory</option></select>
   <label><input id="lab" type="checkbox"> Labeled only</label>
   <label><input id="trd" type="checkbox"> Traded only</label>
+  <button type="button" class="btn" id="reset-cols" title="Put the columns back in their default order">Reset columns</button>
   <span class="count" id="count"></span>
 </div>
 <div class="wrap">
@@ -149,11 +157,39 @@ tr.detail td{background:#0f141a;border-bottom:1px solid var(--line);padding:10px
   else $('sync').textContent = 'armory sync has not run yet';
   if (sy.configured && sy.lastError) { var w = el('span', 'warn', ' · last sync failed: ' + sy.lastError); $('sync').appendChild(w); }
 
-  // Columns per tab. Each: [key, title, cell(row) -> Node|string, class]
-  var COLS = {
+  // Default column order per tab. 'item' is always first and can't be moved.
+  var DEFAULT_COLS = {
     weapons: ['item', 'category', 'status', 'loanedTo', 'label', 'note', 'damage', 'accuracy', 'bonuses', 'tradeAt'],
     armor: ['item', 'status', 'loanedTo', 'label', 'note', 'defence', 'bonuses', 'tradeAt']
   };
+  // Each viewer's own column order, saved in their browser (may be unavailable).
+  var ORDER_KEY = 'tms-an-view-cols-';
+  function loadOrder(type) {
+    var def = DEFAULT_COLS[type], saved = [];
+    try { saved = JSON.parse(localStorage.getItem(ORDER_KEY + type) || '[]'); } catch (e) { saved = []; }
+    if (!Array.isArray(saved)) saved = [];
+    // Keep known, movable columns in the saved order; columns added later go at the end.
+    var out = saved.filter(function (k, i) { return k !== 'item' && def.indexOf(k) !== -1 && saved.indexOf(k) === i; });
+    def.forEach(function (k) { if (k !== 'item' && out.indexOf(k) === -1) out.push(k); });
+    return ['item'].concat(out);
+  }
+  function saveOrder(type) {
+    try {
+      if (isDefaultOrder(type)) localStorage.removeItem(ORDER_KEY + type);
+      else localStorage.setItem(ORDER_KEY + type, JSON.stringify(COLS[type].slice(1)));
+    } catch (e) { /* storage blocked: the order still applies until the page is closed */ }
+  }
+  function isDefaultOrder(type) { return COLS[type].join() === DEFAULT_COLS[type].join(); }
+  var COLS = { weapons: loadOrder('weapons'), armor: loadOrder('armor') };
+  // Move column k to just before (or after) column target on the current tab.
+  function moveCol(k, target, after) {
+    var cols = COLS[state.type];
+    if (k === target || k === 'item' || cols.indexOf(k) === -1 || cols.indexOf(target) === -1) return;
+    cols.splice(cols.indexOf(k), 1);
+    var at = cols.indexOf(target) + (after ? 1 : 0);
+    cols.splice(Math.max(1, at), 0, k);
+    saveOrder(state.type); renderHead(); render();
+  }
   var TITLES = { item: 'Item', category: 'Category', status: 'Status', loanedTo: 'Loaned to', label: 'Label', note: 'Note',
     damage: 'Damage', accuracy: 'Accuracy', defence: 'Defence', bonuses: 'Bonuses', tradeAt: 'Last trade' };
   var NUM = { damage: 'dmg', accuracy: 'acc', defence: 'def' };
@@ -201,15 +237,48 @@ tr.detail td{background:#0f141a;border-bottom:1px solid var(--line);padding:10px
     add('Trade logged by', r.tradeLoggedBy);
     td.appendChild(dl); tr.appendChild(td); return tr;
   }
+  var dragKey = '';
+  function clearDropMarks() {
+    Array.prototype.forEach.call($('head').children, function (h) { h.classList.remove('drop-l', 'drop-r'); });
+  }
+  /** True when the pointer is over the right half of a header (drop after it). */
+  function isAfter(th, e) { var b = th.getBoundingClientRect(); return e.clientX > b.left + b.width / 2; }
   function renderHead() {
     var head = $('head'); head.textContent = '';
     COLS[state.type].forEach(function (k) {
       var th = el('th', NUM[k] ? 'num' : '', TITLES[k]); th.setAttribute('data-k', k);
       if (state.k === k) th.setAttribute('aria-sort', state.dir === 1 ? 'ascending' : 'descending');
       th.addEventListener('click', function () { state.dir = state.k === k ? -state.dir : 1; state.k = k; renderHead(); render(); });
+      if (k !== 'item') {
+        th.draggable = true;
+        th.title = 'Click to sort · drag to move';
+        th.addEventListener('dragstart', function (e) {
+          dragKey = k; th.classList.add('dragging');
+          e.dataTransfer.effectAllowed = 'move';
+          try { e.dataTransfer.setData('text/plain', k); } catch (err) { /* some browsers restrict types */ }
+        });
+        th.addEventListener('dragend', function () { dragKey = ''; th.classList.remove('dragging'); clearDropMarks(); });
+      } else {
+        th.title = 'Click to sort';
+      }
+      th.addEventListener('dragover', function (e) {
+        if (!dragKey || dragKey === k) return;
+        var after = isAfter(th, e);
+        if (k === 'item' && !after) return; // nothing goes before Item
+        e.preventDefault(); e.dataTransfer.dropEffect = 'move';
+        clearDropMarks(); th.classList.add(after ? 'drop-r' : 'drop-l');
+      });
+      th.addEventListener('dragleave', function () { th.classList.remove('drop-l', 'drop-r'); });
+      th.addEventListener('drop', function (e) {
+        if (!dragKey) return;
+        e.preventDefault();
+        var from = dragKey; dragKey = ''; clearDropMarks();
+        moveCol(from, k, isAfter(th, e) || k === 'item');
+      });
       head.appendChild(th);
     });
     $('cat').hidden = state.type !== 'weapons';
+    $('reset-cols').disabled = isDefaultOrder(state.type);
   }
   function render() {
     var cols = COLS[state.type];
@@ -239,6 +308,10 @@ tr.detail td{background:#0f141a;border-bottom:1px solid var(--line);padding:10px
     });
   });
   ['q', 'cat', 'src', 'lab', 'trd'].forEach(function (id) { $(id).addEventListener('input', render); $(id).addEventListener('change', render); });
+  $('reset-cols').addEventListener('click', function () {
+    COLS[state.type] = DEFAULT_COLS[state.type].slice();
+    saveOrder(state.type); renderHead(); render();
+  });
   renderHead();
   render();
 })();

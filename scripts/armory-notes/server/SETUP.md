@@ -156,7 +156,7 @@ Each sync makes about 2 to 4 inventory calls plus 1 call per 25 *new* items (sta
 ## Shareable web page (optional)
 
 A read-only page with the same list, served by your Worker, so no Google account is involved and nothing is cached.
-It has a dark theme, colored labels, search, filters and sorting. Editor names stay hidden until a row is clicked.
+It has a dark theme, colored labels, search, filters, sorting, and columns each viewer can drag into their own order. Editor names stay hidden until a row is clicked.
 
 1. In the Worker's **Settings > Runtime variables and secrets**, add a **Secret** named `VIEW_TOKEN` with a long random value (32+ characters). **Copy it first**: Cloudflare won't show it again. Click **Deploy**.
 2. Share this link (with your token):
