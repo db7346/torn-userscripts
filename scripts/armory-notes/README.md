@@ -94,6 +94,7 @@ That is about **1 Torn API call per 12 hours**, and about **1.3 server requests 
 
 ## Changelog
 
+- **Server update (no script change)**: view page shows Damage/Accuracy (Defence for armor) as small DMG/ACC/DEF chips beside the item name instead of separate columns, with a **Sort by stat** menu (high→low or low→high).
 - **Server update (no script change)**: view page columns can be dragged into any order (Item stays first). Each viewer's order is saved in their own browser; **Reset columns** restores the default.
 - **Server update (no script change)**: an item an editor logged as received, but not yet deposited, now shows **Returned to <editor> (not deposited)** instead of "Traded to <editor>" (yellow on the view page, new status filter).
 - **2.6.1**: Clicking **Sync armory now** again within 5 minutes shows a plain "results are already current" notice instead of an error.

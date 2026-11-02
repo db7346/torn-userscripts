@@ -86,6 +86,9 @@ td{padding:7px 10px;border-bottom:1px solid #21262d;vertical-align:top}
 td.item{color:#fff;font-weight:700;white-space:nowrap}
 td.item::before{content:"\\25B8";display:inline-block;width:14px;color:var(--dim);transition:transform .15s}
 tr.open td.item::before{transform:rotate(90deg)}
+.chip{display:inline-block;margin-left:6px;padding:1px 7px;border-radius:9px;font-size:11px;font-weight:700;vertical-align:1px}
+.chip i{font-style:normal;font-weight:400;opacity:.75;margin-right:3px}
+.chip-dmg{background:#3d1a1a;color:var(--red)}.chip-acc{background:#16263d;color:var(--blue)}.chip-def{background:#2a1d40;color:var(--purple)}
 td.note{max-width:320px;white-space:pre-wrap;word-break:break-word}
 .cat-Primary{color:var(--orange)}.cat-Secondary{color:var(--blue)}.cat-Melee{color:var(--green2)}.cat-Armor{color:var(--purple);font-weight:700}
 .src-armory{color:var(--green2)}.src-out{color:var(--amber);font-style:italic}
@@ -125,6 +128,7 @@ tr.detail td{background:#0f141a;border-bottom:1px solid var(--line);padding:10px
 </div>
 <div class="controls">
   <input id="q" type="search" placeholder="Search item, label, note, bonus…" aria-label="Search">
+  <select id="sort" aria-label="Sort by stat"></select>
   <select id="cat" aria-label="Category"><option value="">All categories</option><option>Primary</option><option>Secondary</option><option>Melee</option></select>
   <select id="src" aria-label="Status"><option value="">Any status</option><option value="in">In armory</option><option value="loaned">Loaned out</option><option value="traded">Traded</option><option value="returned">Returned, not deposited</option><option value="missing">Missing</option><option value="out">Not in armory</option></select>
   <label><input id="lab" type="checkbox"> Labeled only</label>
@@ -159,8 +163,13 @@ tr.detail td{background:#0f141a;border-bottom:1px solid var(--line);padding:10px
 
   // Default column order per tab. 'item' is always first and can't be moved.
   var DEFAULT_COLS = {
-    weapons: ['item', 'category', 'status', 'loanedTo', 'label', 'note', 'damage', 'accuracy', 'bonuses', 'tradeAt'],
-    armor: ['item', 'status', 'loanedTo', 'label', 'note', 'defence', 'bonuses', 'tradeAt']
+    weapons: ['item', 'category', 'status', 'loanedTo', 'label', 'note', 'bonuses', 'tradeAt'],
+    armor: ['item', 'status', 'loanedTo', 'label', 'note', 'bonuses', 'tradeAt']
+  };
+  // Stats are shown as chips beside the item name and sorted from the "Sort by" menu.
+  var STATS = {
+    weapons: [['damage', 'DMG', 'chip-dmg', 'Damage'], ['accuracy', 'ACC', 'chip-acc', 'Accuracy']],
+    armor: [['defence', 'DEF', 'chip-def', 'Defence']]
   };
   // Each viewer's own column order, saved in their browser (may be unavailable).
   var ORDER_KEY = 'tms-an-view-cols-';
@@ -195,7 +204,16 @@ tr.detail td{background:#0f141a;border-bottom:1px solid var(--line);padding:10px
   var NUM = { damage: 'dmg', accuracy: 'acc', defence: 'def' };
   function cell(k, r) {
     var td;
-    if (k === 'item') return el('td', 'item', r.item);
+    if (k === 'item') {
+      td = el('td', 'item', r.item);
+      (STATS[r.type] || []).forEach(function (s) {
+        if (typeof r[s[0]] !== 'number') return;
+        var c = el('span', 'chip ' + s[2]); c.title = s[3];
+        c.appendChild(el('i', '', s[1])); c.appendChild(document.createTextNode(num(r[s[0]])));
+        td.appendChild(c);
+      });
+      return td;
+    }
     if (k === 'category') return el('td', 'cat-' + r.category, r.category);
     if (k === 'status') { td = el('td'); td.appendChild(el('span', 'st st-' + r.statusKind, r.status)); return td; }
     if (k === 'loanedTo') return el('td', 'loan', r.loanedTo);
@@ -237,6 +255,22 @@ tr.detail td{background:#0f141a;border-bottom:1px solid var(--line);padding:10px
     add('Trade logged by', r.tradeLoggedBy);
     td.appendChild(dl); tr.appendChild(td); return tr;
   }
+  /** Fill the "Sort by" menu for the current tab; it reflects a stat sort in progress. */
+  function renderSortMenu() {
+    var sel = $('sort'); sel.textContent = '';
+    var none = el('option', '', 'Sort by stat…'); none.value = ''; sel.appendChild(none);
+    STATS[state.type].forEach(function (s) {
+      var hi = el('option', '', s[3] + ' (high → low)'); hi.value = s[0] + ':-1'; sel.appendChild(hi);
+      var lo = el('option', '', s[3] + ' (low → high)'); lo.value = s[0] + ':1'; sel.appendChild(lo);
+    });
+    var cur = state.k + ':' + state.dir;
+    sel.value = Array.prototype.some.call(sel.options, function (o) { return o.value === cur; }) ? cur : '';
+  }
+  $('sort').addEventListener('change', function () {
+    var v = $('sort').value;
+    if (!v) { state.k = ''; state.dir = 1; } else { state.k = v.split(':')[0]; state.dir = Number(v.split(':')[1]); }
+    renderHead(); render();
+  });
   var dragKey = '';
   function clearDropMarks() {
     Array.prototype.forEach.call($('head').children, function (h) { h.classList.remove('drop-l', 'drop-r'); });
@@ -278,6 +312,7 @@ tr.detail td{background:#0f141a;border-bottom:1px solid var(--line);padding:10px
       head.appendChild(th);
     });
     $('cat').hidden = state.type !== 'weapons';
+    renderSortMenu();
     $('reset-cols').disabled = isDefaultOrder(state.type);
   }
   function render() {
