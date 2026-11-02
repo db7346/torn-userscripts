@@ -54,7 +54,7 @@ Everything still works. The Faction Armory then uses your private notes, as in v
 | Upload local notes to faction | Editors only. Pick local notes to move to the faction. Items seen in the faction armory are pre-ticked. Uploaded notes are removed locally, and items that already have a faction note are skipped. |
 | Trade log (editors) | Recent trades logged with **Log This As Traded**, with Remove buttons for mistakes |
 | Sync armory now (editors) | Ask the server to read the whole faction armory now (it also does so every 6 hours, once set up) |
-| Clear faction notes cache | Forget cached faction notes and sign in again |
+| Reload faction notes (fix stale data) | Throw away this browser's copy of the faction notes and load them fresh from the server (signs in again). Deletes nothing. |
 | Export local notes (backup) | Downloads `torn-armory-notes-YYYY-MM-DD.json` |
 | Import local notes (restore) | Pick a backup, then **Merge** (newer note wins per item) or **Replace all** |
 | Clear all local notes | Deletes every local note (offers to export first) |
@@ -94,6 +94,7 @@ That is about **1 Torn API call per 12 hours**, and about **1.3 server requests 
 
 ## Changelog
 
+- **2.6.2**: Menu item **Clear faction notes cache** renamed to **Reload faction notes (fix stale data)**, since it deletes nothing.
 - **Server update (no script change)**: view page shows Damage/Accuracy (Defence for armor) as small DMG/ACC/DEF chips beside the item name instead of separate columns, with a **Sort by stat** menu (high→low or low→high).
 - **Server update (no script change)**: view page columns can be dragged into any order (Item stays first). Each viewer's order is saved in their own browser; **Reset columns** restores the default.
 - **Server update (no script change)**: an item an editor logged as received, but not yet deposited, now shows **Returned to <editor> (not deposited)** instead of "Traded to <editor>" (yellow on the view page, new status filter).

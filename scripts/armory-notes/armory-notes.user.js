@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Armory Notes
 // @namespace    dadgum.torn.armorynotes
-// @version      2.6.1
+// @version      2.6.2
 // @description  Colored labels and notes on individual weapons and armor (keyed by armory ID). Private notes on the Items page; shared faction notes in the Faction Armory.
 // @author       DadGum
 // @license      MIT
@@ -48,6 +48,9 @@
  * Author: DadGum
  *
  * Changelog
+ *   2.6.2 (2026-11-02) Menu item "Clear faction notes cache" renamed to
+ *                      "Reload faction notes (fix stale data)" so it doesn't
+ *                      look destructive. Same behavior: nothing is deleted.
  *   2.6.1 (2026-11-01) "Sync armory now" within 5 minutes of the last sync now
  *                      shows a plain notice that the results are current,
  *                      instead of an error.
@@ -3965,11 +3968,11 @@ ${colorRules}
         GM_registerMenuCommand('Sync armory now (editors)', guard('Armory sync', () => {
             syncArmoryNow().catch((err) => reportError('Armory sync', err));
         }));
-        GM_registerMenuCommand('Clear faction notes cache', guard('Clear cache', () => {
+        GM_registerMenuCommand('Reload faction notes (fix stale data)', guard('Reload faction notes', () => {
             SharedStore.clear();
             Session.clear();
             refreshAll();
-            Notice.show('Faction notes cache cleared. Notes reload on the next refresh.');
+            Notice.show('Reloading faction notes from the server. Nothing was deleted.');
             if (PageState.factionArmoryOpen) Shared.refreshAndRender();
         }));
         GM_registerMenuCommand('Export local notes (backup)', guard('Export', openExportDialog));
