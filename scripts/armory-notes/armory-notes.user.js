@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Armory Notes
 // @namespace    dadgum.torn.armorynotes
-// @version      2.4.0
+// @version      2.5.0
 // @description  Colored labels and notes on individual weapons and armor (keyed by armory ID). Private notes on the Items page; shared faction notes in the Faction Armory.
 // @author       DadGum
 // @license      MIT
@@ -48,6 +48,11 @@
  * Author: DadGum
  *
  * Changelog
+ *   2.5.0 (2026-11-01) Editors get a "Log This As Traded" checkbox on the
+ *                      trade view: logs the trade's bonus armory items for
+ *                      the spreadsheet ("Traded to …"); untick to undo.
+ *                      Tampermonkey menu "Trade log" lists logged trades
+ *                      with Remove buttons.
  *   2.4.0 (2026-11-01) Editors' browsers record every weapon/armor with a
  *                      bonus seen in the Faction Armory (name, stats,
  *                      bonuses, last seen) for the faction's spreadsheet.
@@ -309,6 +314,13 @@
             // Item stats, used for fingerprints. The trade view keeps them in
             // the info icon's title (HTML text, parsed as a string, never rendered).
             TRADE_VIEW_INFO: ':scope > .name i.networth-info-icon',
+            // Trade view: the "This trade expires…" bar right above the trade,
+            // and the two players' names in the column headings.
+            TRADE_CONT: '.trade-cont',
+            TRADE_BAR: '.info-msg-cont',
+            TRADE_MY_NAME: '.trade-cont .user.left .title-divider',
+            TRADE_PARTNER_NAME: '.trade-cont .user.right > .title-black',
+            TRADE_ID_LINK: 'a[href*="ID="]',
             ITEMS_STATS: ':scope .bonuses-wrap',
             FACTION_STATS: ':scope > ul.bonuses',
         }),
@@ -331,6 +343,12 @@
         checkRow: `${PREFIX}-check`,
         linkRow: `${PREFIX}-links`,
         status: `${PREFIX}-status`,
+        /** Marks any element this script adds (so observers ignore it). */
+        own: `${PREFIX}-own`,
+        logBox: `${PREFIX}-logbox`,
+        logHost: `${PREFIX}-loghost`,
+        logGroup: `${PREFIX}-loggroup`,
+        logItem: `${PREFIX}-logitem`,
         label: `${PREFIX}-label`,
         icon: `${PREFIX}-icon`,
         thumbHost: `${PREFIX}-thost`,
@@ -491,6 +509,7 @@
      *   rescanned when faction notes change and buttons removed when no note matches.
      * @property {boolean} [backfill]                             - Editors record fingerprints from this page.
      * @property {boolean} [trackItems]                           - Editors record bonus items from this page.
+     * @property {(root: Element) => void} [afterScan]           - Runs after each scan of the root.
      * @property {boolean} [anyCategory]                          - Skip the category filter
      *   (pages that only show existing faction notes).
      */
@@ -2038,6 +2057,16 @@ ${colorRules}
 .${CLS.checkRow}{display:flex;gap:6px;align-items:flex-start;padding:2px 0;cursor:pointer;}
 .${CLS.checkRow} input{margin:2px 0 0;flex:0 0 auto;}
 .${CLS.linkRow}{display:flex;gap:6px;}
+.${CLS.logHost}{position:relative !important;}
+.${CLS.logBox}{position:absolute;right:12px;top:50%;transform:translateY(-50%);z-index:5;display:flex;align-items:center;
+  gap:6px;font:bold 12px Arial,Helvetica,sans-serif;color:#e6e6e6;cursor:pointer;user-select:none;
+  background:rgba(0,0,0,.35);border:1px solid #555;border-radius:4px;padding:3px 8px;}
+.${CLS.logBox} input{margin:0;cursor:pointer;}
+.${CLS.logBox}[aria-busy="true"]{opacity:.6;cursor:progress;}
+.${CLS.logGroup}{border-bottom:1px solid #3a3f47;padding:6px 0;}
+.${CLS.logGroup} > div:first-child{display:flex;align-items:center;gap:6px;font-weight:700;margin-bottom:3px;}
+.${CLS.logItem}{display:flex;align-items:center;gap:6px;padding:2px 0 2px 8px;}
+.${CLS.logItem} > span,.${CLS.logGroup} > div:first-child > span{flex:1 1 auto;}
 .${CLS.notices}{position:fixed;right:16px;bottom:16px;z-index:${z + 3};display:flex;flex-direction:column;gap:6px;}
 .${CLS.notice}{padding:8px 10px;max-width:320px;${panel}}
 .${CLS.noticeError}{border-color:#d9534f;}
@@ -3064,6 +3093,227 @@ ${colorRules}
         if (!Shared.isActive()) SharedSync.stop();
     }
 
+    /* ---- Trade log ("Log This As Traded", editors only) --------------------- */
+    // A manual switch: ticking it records the trade's bonus armory items for
+    // the faction spreadsheet ("Traded to …"); unticking removes the record.
+    // It never touches the trade itself.
+
+    const TradeLogBox = {
+        /** @type {Map<string, boolean>} trade ID -> logged (this page load). */
+        _state: new Map(),
+
+        /**
+         * Trade ID of the open trade.
+         * @param {Element} root - Trade container.
+         * @returns {string} Trade ID or ''.
+         */
+        _tradeId(root) {
+            const fromHash = /[?&#/]ID=(\d{1,20})/.exec(location.hash)?.[1];
+            if (fromHash) return fromHash;
+            const href = root.querySelector(CONFIG.SEL.TRADE_ID_LINK)?.getAttribute('href') ?? '';
+            return /[?&#]ID=(\d{1,20})/.exec(href)?.[1] ?? '';
+        },
+
+        /**
+         * Add, keep or remove the checkbox (idempotent; runs after every scan).
+         * @param {Element} root - Trade container.
+         * @returns {void}
+         */
+        ensure(root) {
+            const existing = root.querySelector(`.${CLS.logBox}`);
+            const cont = root.querySelector(CONFIG.SEL.TRADE_CONT);
+            const tradeId = cont ? this._tradeId(root) : '';
+            if (!cont || !tradeId || !Shared.isActive() || !Shared.canEdit()) {
+                existing?.remove();
+                return;
+            }
+            if (existing && existing.dataset.tradeId === tradeId) return;
+            existing?.remove();
+            const bar = cont.previousElementSibling?.matches(CONFIG.SEL.TRADE_BAR) ? cont.previousElementSibling : null;
+            if (!bar) return; // layout changed: no place for the box
+            bar.classList.add(CLS.logHost);
+            const input = /** @type {HTMLInputElement} */ (el('input', { attrs: { type: 'checkbox' } }));
+            const box = el('label', { cls: [CLS.logBox, CLS.own], attrs: { title: 'Editors: record this trade in the faction spreadsheet' } },
+                [input, el('span', { text: 'Log This As Traded' })]);
+            box.dataset.tradeId = tradeId;
+            // Keep clicks away from Torn's own handlers on the bar.
+            box.addEventListener('click', (e) => e.stopPropagation());
+            input.addEventListener('change', () => {
+                this._toggle(root, tradeId, input, box).catch((err) => reportError('Trade log', err));
+            });
+            bar.append(box);
+            this._loadState(tradeId, input, box);
+        },
+
+        /**
+         * Show whether the trade is already logged (one request per trade per page load).
+         * @param {string} tradeId - Trade ID.
+         * @param {HTMLInputElement} input - Checkbox.
+         * @param {HTMLElement} box - Label.
+         * @returns {void}
+         */
+        _loadState(tradeId, input, box) {
+            if (this._state.has(tradeId)) {
+                input.checked = this._state.get(tradeId);
+                return;
+            }
+            this._busy(box, input, true);
+            Server.request('GET', `/trades/${tradeId}`)
+                .then((data) => {
+                    this._state.set(tradeId, data?.logged === true);
+                    input.checked = data?.logged === true;
+                })
+                .catch((err) => handleSharedError('Trade log', err, { quiet: true }))
+                .finally(() => this._busy(box, input, false));
+        },
+
+        /**
+         * @param {HTMLElement} box - Label.
+         * @param {HTMLInputElement} input - Checkbox.
+         * @param {boolean} on - Busy state.
+         * @returns {void}
+         */
+        _busy(box, input, on) {
+            input.disabled = on;
+            box.setAttribute('aria-busy', String(on));
+        },
+
+        /**
+         * The trade's items that might be armory items: yours by armory ID,
+         * theirs by stats (the server does the matching).
+         * @param {Element} root - Trade container.
+         * @returns {{from: string, to: string, items: Object[]}} Request body.
+         */
+        _collect(root) {
+            const me = ownText(root.querySelector(CONFIG.SEL.TRADE_MY_NAME)) || Session.peek()?.player.name || '';
+            const partner = ownText(root.querySelector(CONFIG.SEL.TRADE_PARTNER_NAME));
+            const items = [];
+            root.querySelectorAll(CONFIG.SEL.TRADE_VIEW_ROW).forEach((row) => {
+                const name = ownText(row.querySelector(CONFIG.SEL.TRADE_VIEW_NAME));
+                if (row.querySelector(CONFIG.SEL.TRADE_VIEW_REMOVE)) {
+                    const id = TRADE_VIEW_ADAPTER.getId(row);
+                    if (Data.isValidArmoryId(id)) items.push({ armoryId: id, itemName: name, direction: 'out' });
+                } else {
+                    const { fp } = rowItemInfo(row, TRADE_PARTNER_ADAPTER);
+                    if (fp) items.push({ fingerprint: fp, itemName: name, direction: 'in' });
+                }
+            });
+            return { from: me, to: partner, items };
+        },
+
+        /**
+         * Log or un-log the trade after the checkbox changes.
+         * @param {Element} root - Trade container.
+         * @param {string} tradeId - Trade ID.
+         * @param {HTMLInputElement} input - Checkbox.
+         * @param {HTMLElement} box - Label.
+         * @returns {Promise<void>}
+         */
+        async _toggle(root, tradeId, input, box) {
+            const want = input.checked;
+            this._busy(box, input, true);
+            try {
+                if (want) {
+                    const body = this._collect(root);
+                    if (!body.from || !body.to) throw new Error('Could not read the players\' names from this trade.');
+                    const data = await Server.request('POST', `/trades/${tradeId}`, { body });
+                    const n = data?.logged?.length ?? 0;
+                    if (!n) {
+                        input.checked = false;
+                        Notice.show('Nothing logged: this trade has no bonus weapons or armor from the armory or with a faction note.');
+                    } else {
+                        Notice.show(`Logged ${n} item${n === 1 ? '' : 's'} as traded. The spreadsheet updates within an hour.`);
+                    }
+                    this._state.set(tradeId, n > 0);
+                } else {
+                    await Server.request('DELETE', `/trades/${tradeId}`);
+                    this._state.set(tradeId, false);
+                    Notice.show('Trade log removed for this trade.');
+                }
+            } catch (err) {
+                input.checked = !want;
+                handleSharedError('Trade log', err);
+            } finally {
+                this._busy(box, input, false);
+            }
+        },
+    };
+
+    /**
+     * Tampermonkey menu: list recent logged trades with Remove buttons (editors).
+     * @returns {Promise<void>}
+     */
+    async function openTradeLogDialog() {
+        if (!Shared.isActive()) {
+            openSettingsDialog('Set up faction sharing first.');
+            return;
+        }
+        if (!Shared.canEdit()) {
+            Notice.show('Only faction note editors can view or change the trade log.');
+            return;
+        }
+        let data;
+        try {
+            data = await Server.request('GET', '/trades?limit=100');
+        } catch (err) {
+            handleSharedError('Trade log', err);
+            return;
+        }
+        const entries = Array.isArray(data?.items) ? data.items : [];
+        /** @type {Map<string, Object[]>} */
+        const groups = new Map();
+        for (const e of entries) {
+            if (!groups.has(e.tradeId)) groups.set(e.tradeId, []);
+            groups.get(e.tradeId).push(e);
+        }
+        const list = el('div', { cls: CLS.checklist });
+        const mkBtn = (text, onClick) => {
+            const b = el('button', { cls: [CLS.uiBtn, CLS.uiDanger], text, attrs: { type: 'button' } });
+            b.addEventListener('click', async () => {
+                b.disabled = true;
+                try {
+                    await onClick();
+                } catch (err) {
+                    b.disabled = false;
+                    handleSharedError('Trade log', err);
+                }
+            });
+            return b;
+        };
+        for (const [tradeId, items] of groups) {
+            const when = new Date(items[0].loggedAt).toLocaleString();
+            const group = el('div', { cls: CLS.logGroup });
+            const head = el('div', {}, [el('span', { text: `Trade #${tradeId} · ${when} · logged by ${items[0].loggedByName || 'unknown'}` })]);
+            head.append(mkBtn('Remove trade', async () => {
+                await Server.request('DELETE', `/trades/${tradeId}`);
+                TradeLogBox._state.delete(tradeId);
+                group.remove();
+                Notice.show(`Removed trade #${tradeId} from the log.`);
+            }));
+            group.append(head);
+            for (const it of items) {
+                const row = el('div', { cls: CLS.logItem }, [el('span', { text: `${it.itemName || `#${it.armoryId}`}: traded to ${it.to} (from ${it.from})` })]);
+                row.append(mkBtn('Remove', async () => {
+                    await Server.request('DELETE', `/trades/${tradeId}/${it.armoryId}`);
+                    TradeLogBox._state.delete(tradeId);
+                    row.remove();
+                    if (!group.querySelector(`.${CLS.logItem}`)) group.remove();
+                    Notice.show(`Removed ${it.itemName || 'item'} from trade #${tradeId}.`);
+                }));
+                group.append(row);
+            }
+            list.append(group);
+        }
+        Modal.open({
+            title: 'Trade log',
+            message: entries.length
+                ? 'Recent trades logged with "Log This As Traded". Remove an entry if a trade fell through; the spreadsheet updates within an hour.'
+                : 'No trades have been logged yet.',
+            content: entries.length ? [list] : [],
+            actions: [{ label: 'Close', variant: 'primary', onClick: () => Modal.close() }],
+        });
+    }
+
     /* ---- Page adapters (DOM reading) -------------------------------------- */
 
     /**
@@ -3185,6 +3435,7 @@ ${colorRules}
         getName: (row) => ownText(row.querySelector(CONFIG.SEL.TRADE_VIEW_NAME)),
         getStats: (row) => tradeRowStats(row),
         backfill: true,
+        afterScan: (root) => TradeLogBox.ensure(root),
         mounts: [
             {
                 kind: 'trade',
@@ -3377,9 +3628,10 @@ ${colorRules}
      */
     function isOwnMutation(rec) {
         const target = rec.target.nodeType === Node.ELEMENT_NODE ? rec.target : rec.target.parentElement;
-        if (target?.closest(`.${CLS.btn}`)) return true;
+        if (target?.closest(`.${CLS.btn}, .${CLS.own}`)) return true;
         const nodes = [...rec.addedNodes, ...rec.removedNodes];
-        return nodes.length > 0 && nodes.every((n) => n.nodeType === Node.ELEMENT_NODE && n.classList.contains(CLS.btn));
+        return nodes.length > 0 && nodes.every((n) => n.nodeType === Node.ELEMENT_NODE
+            && (n.classList.contains(CLS.btn) || n.classList.contains(CLS.own)));
     }
 
     /** Watchers currently attached (rescanned when sharing settings change). @type {Set<RootWatcher>} */
@@ -3458,6 +3710,7 @@ ${colorRules}
             if (!this.root?.isConnected) return;
             try {
                 this.root.querySelectorAll(this.adapter.rowSelector).forEach((row) => decorateRow(row, this.adapter));
+                this.adapter.afterScan?.(this.root);
             } catch (err) {
                 reportError(`Could not add note buttons (${this.adapter.name})`, err);
             }
@@ -3656,6 +3909,9 @@ ${colorRules}
         }));
         GM_registerMenuCommand('Upload local notes to faction', guard('Upload', () => {
             openUploadDialog().catch((err) => reportError('Upload', err));
+        }));
+        GM_registerMenuCommand('Trade log (editors)', guard('Trade log', () => {
+            openTradeLogDialog().catch((err) => reportError('Trade log', err));
         }));
         GM_registerMenuCommand('Clear faction notes cache', guard('Clear cache', () => {
             SharedStore.clear();

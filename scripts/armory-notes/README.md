@@ -52,6 +52,7 @@ Everything still works. The Faction Armory then uses your private notes, as in v
 | Settings (faction sharing) | Set the server URL and your API key; sign in or out |
 | Refresh faction notes | Fetch the latest faction notes now |
 | Upload local notes to faction | Editors only. Pick local notes to move to the faction. Items seen in the faction armory are pre-ticked. Uploaded notes are removed locally, and items that already have a faction note are skipped. |
+| Trade log (editors) | Recent trades logged with **Log This As Traded**, with Remove buttons for mistakes |
 | Clear faction notes cache | Forget cached faction notes and sign in again |
 | Export local notes (backup) | Downloads `torn-armory-notes-YYYY-MM-DD.json` |
 | Import local notes (restore) | Pick a backup, then **Merge** (newer note wins per item) or **Replace all** |
@@ -92,6 +93,7 @@ That is about **1 Torn API call per 12 hours**, and about **1.3 server requests 
 
 ## Changelog
 
+- **2.5.0**: Editors get a **Log This As Traded** checkbox on trades, which logs the trade's bonus armory items for the spreadsheet ("Traded to …"); untick to undo. Tampermonkey menu **Trade log (editors)** lists logged trades with Remove buttons. Sheet: new Source column (Armory / Not in armory) and Last trade columns in place of Last seen; only bonus items are listed. Needs migration `0004_trade_log.sql`.
 - **2.4.0**: Editors' browsers record every weapon and armor piece with a bonus seen in the Faction Armory (name, stats, bonuses, last seen) for the faction's spreadsheet, with a blank label until someone adds a note. Nothing changes in game. Needs migration `0003_tracked_items.sql`.
 - **2.3.0**: Editors' browsers also record each noted item's bonuses ("22% Execute"). The server can publish a live spreadsheet feed of faction notes, with stats, bonuses, last edit and previous edit, for Google Sheets (see SETUP.md). Needs migration `0002_bonuses.sql`.
 - **2.2.0**: Trade view shows faction notes on the other person's items too, matched by item stats ("fingerprint"), since Torn shows no ID for them. Editors' browsers record fingerprints automatically from the armory, Items page and their own trades. Needs the server update in this release and the `migrations/0001_fingerprint.sql` database change (see SETUP.md).

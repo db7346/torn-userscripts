@@ -97,6 +97,7 @@ Some releases change the database. Run each new file in [`migrations/`](migratio
 | `0001_fingerprint.sql` | 2.2.0 | Adds item fingerprints (for matching the other person's trade items) and a separate sync marker |
 | `0002_bonuses.sql` | 2.3.0 | Adds readable bonus text ("22% Execute") for the spreadsheet export |
 | `0003_tracked_items.sql` | 2.4.0 | Adds the list of bonus items seen in the faction armory, for the spreadsheet |
+| `0004_trade_log.sql` | 2.5.0 | Adds the trade log ("Log This As Traded") |
 
 New databases created from `schema.sql` already include every migration.
 
@@ -115,15 +116,21 @@ The server can publish the live faction notes as a spreadsheet feed for Google S
 
 Google refreshes it about once an hour, and when the sheet is opened.
 
-The sheet lists every weapon and armor piece **with a bonus** that an editor's browser has seen in the Faction Armory, plus any noted item that isn't in the armory. Items without a note have a blank label until someone adds one. Items that leave the armory stay listed, with their "Last seen" date.
+The sheet lists every weapon and armor piece **with a bonus** that an editor's browser has seen in the Faction Armory (Source: **Armory**), then any bonus item that has a faction note but was never seen in the armory (Source: **Not in armory**). Items without a note have a blank label until someone adds one. Items without a bonus are never listed.
 
 | Column | |
 |---|---|
-| Item, Category, Label, Note, Color, Armory ID | The item, and its faction note if it has one |
+| Item, Category, Source, Label, Note, Color, Armory ID | The item, where it's known from, and its faction note if it has one |
 | Damage, Accuracy / Defence, Bonuses | The item's stats, recorded automatically by editors' browsers |
 | Last edited by / (TCT) | Who changed the note last, and when (Torn City Time) |
 | Previous edit by / (TCT) | The change before that (blank if there was only one) |
-| Last seen in armory (TCT) | When an editor's browser last saw the item in the Faction Armory (blank if never) |
+| Last trade, Last trade (TCT), Trade logged by | The latest trade an editor logged for this item ("Traded to ChaosRipper"), when, and who logged it |
+
+### Logging trades
+
+Editors see a **Log This As Traded** checkbox in the "This trade expires…" bar on a trade. Ticking it logs that trade's bonus weapons and armor that are armory items or have a faction note: yours as "Traded to <them>", theirs (matched by stats) as "Traded to <you>". Other items are ignored. Untick it to remove the log.
+
+To fix a mistake later, use **Tampermonkey menu > Trade log (editors)**: it lists recent logged trades with a **Remove** button per item and per trade. The sheet itself is read-only (Google re-imports it), so make corrections there, not in the sheet.
 
 **Keep the link private.** Anyone with it, or anyone who can see the formula in the sheet, can read every faction note. If it leaks, change `EXPORT_TOKEN`, click Deploy, and update the formula; the old link stops working immediately.
 

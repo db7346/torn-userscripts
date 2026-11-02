@@ -12,7 +12,13 @@
  *   POST   /items/seen           editors: record bonus items seen in the faction armory
  *                                { items: [{ armoryId, itemName, itemId, category,
  *                                            fingerprint, bonuses }] }
- *   GET    /export.csv?token=    tracked items + notes as CSV for a spreadsheet (needs the
+ *   GET    /trades?limit=        editors: recent trade-log entries
+ *   GET    /trades/:tradeId      editors: whether a trade is logged, and its items
+ *   POST   /trades/:tradeId      editors: log a trade { from, to, items: [{ armoryId or
+ *                                fingerprint, itemName, direction: 'out'|'in' }] }
+ *                                (replaces earlier log; fingerprints are matched here)
+ *   DELETE /trades/:tradeId[/:armoryId]  editors: remove a trade's log (or one item)
+ *   GET    /export.csv?token=    bonus items + notes as CSV for a spreadsheet (needs the
  *                                EXPORT_TOKEN secret; off when it is not set)
  *
  * Sync: clients poll with ?since=<changed>. `changed_at` moves on every change
@@ -55,6 +61,10 @@ const CONFIG = Object.freeze({
     BONUSES_MAX: 200,
     EXPORT_TOKEN_MIN: 16,
     MAX_SEEN: 500,
+    MAX_TRADE_ITEMS: 50,
+    TRADE_ID_PATTERN: /^\d{1,20}$/,
+    PLAYER_NAME_PATTERN: /^[A-Za-z0-9_-]{1,32}$/,
+    TRADE_LIST_MAX: 200,
     CATEGORIES: Object.freeze(['Primary', 'Secondary', 'Melee', 'Defensive']),
     API_KEY_PATTERN: /^[A-Za-z0-9]{16}$/,
 });
@@ -639,6 +649,171 @@ async function handleItemsSeen(request, cfg) {
 }
 
 /* ===========================================================================
+ * Trade log (editors tick "Log This As Traded" on a trade page)
+ * ======================================================================== */
+
+/**
+ * Armory IDs that may be logged: weapons/armor with a bonus that were seen in
+ * the faction armory, or that have a faction note with a bonus recorded.
+ * @param {any} db - D1 binding.
+ * @param {string[]} ids - Candidate armory IDs.
+ * @returns {Promise<Map<string, string>>} Eligible ID -> item name.
+ */
+async function eligibleTradeItems(db, ids) {
+    const out = new Map();
+    for (let i = 0; i < ids.length; i += 45) {
+        const chunk = ids.slice(i, i + 45);
+        const marks = chunk.map((_, j) => `?${j + 1}`).join(',');
+        const { results } = await db.prepare(
+            `SELECT armory_id, item_name FROM tracked_items WHERE bonuses <> '' AND armory_id IN (${marks})
+             UNION
+             SELECT armory_id, item_name FROM notes WHERE deleted = 0 AND bonuses <> '' AND armory_id IN (${marks})`,
+        ).bind(...chunk).all();
+        for (const r of results ?? []) if (!out.has(r.armory_id) || !out.get(r.armory_id)) out.set(r.armory_id, r.item_name);
+    }
+    return out;
+}
+
+/**
+ * The one armory ID whose recorded stats match a fingerprint.
+ * @param {any} db - D1 binding.
+ * @param {string|null} fp - Fingerprint.
+ * @returns {Promise<string>} Armory ID, or '' if none or ambiguous (no guessing).
+ */
+async function armoryIdByFingerprint(db, fp) {
+    if (!fp) return '';
+    const { results } = await db.prepare(
+        `SELECT armory_id FROM tracked_items WHERE fingerprint = ?1
+         UNION SELECT armory_id FROM notes WHERE deleted = 0 AND fingerprint = ?1 LIMIT 2`,
+    ).bind(fp).all();
+    return (results ?? []).length === 1 ? results[0].armory_id : '';
+}
+
+/**
+ * Validate a trade ID from the path.
+ * @param {string} raw - Path segment.
+ * @returns {string} Trade ID.
+ * @throws {HttpError} 400 if invalid.
+ */
+function tradeId(raw) {
+    const s = String(raw ?? '');
+    if (!CONFIG.TRADE_ID_PATTERN.test(s)) throw new HttpError(400, 'bad_trade', 'Invalid trade ID.');
+    return s;
+}
+
+/**
+ * Convert trade_log rows to the API shape.
+ * @param {Object} r - Row.
+ * @returns {Object} Entry.
+ */
+function tradeRow(r) {
+    return {
+        tradeId: r.trade_id, armoryId: r.armory_id, itemName: r.item_name, from: r.from_name, to: r.to_name,
+        loggedAt: r.logged_at, loggedById: r.logged_by_id, loggedByName: r.logged_by_name,
+    };
+}
+
+/**
+ * GET /trades/:tradeId - whether this trade is logged.
+ * @param {Request} request - Request.
+ * @param {string} rawId - Trade ID.
+ * @param {ReturnType<typeof settings>} cfg - Settings.
+ * @returns {Promise<Response>} { logged, items }.
+ */
+async function handleTradeGet(request, rawId, cfg) {
+    const user = await requireUser(request, cfg);
+    requireEditor(user, cfg);
+    const id = tradeId(rawId);
+    const { results } = await cfg.db.prepare('SELECT * FROM trade_log WHERE trade_id = ?1 ORDER BY id').bind(id).all();
+    return json(request, 200, { logged: (results ?? []).length > 0, items: (results ?? []).map(tradeRow) });
+}
+
+/**
+ * GET /trades?limit= - recent log entries (newest first).
+ * @param {Request} request - Request.
+ * @param {URL} url - URL.
+ * @param {ReturnType<typeof settings>} cfg - Settings.
+ * @returns {Promise<Response>} { items }.
+ */
+async function handleTradeList(request, url, cfg) {
+    const user = await requireUser(request, cfg);
+    requireEditor(user, cfg);
+    const limit = Math.min(CONFIG.TRADE_LIST_MAX, Math.max(1, Number(url.searchParams.get('limit')) || 100));
+    const { results } = await cfg.db.prepare('SELECT * FROM trade_log ORDER BY logged_at DESC, id DESC LIMIT ?1').bind(limit).all();
+    return json(request, 200, { items: (results ?? []).map(tradeRow) });
+}
+
+/**
+ * POST /trades/:tradeId - log a trade. Only eligible items are kept; an
+ * earlier log of the same trade is replaced.
+ * @param {Request} request - Request.
+ * @param {string} rawId - Trade ID.
+ * @param {ReturnType<typeof settings>} cfg - Settings.
+ * @returns {Promise<Response>} { logged: [...], skipped: [armoryId] }.
+ */
+async function handleTradeLog(request, rawId, cfg) {
+    const user = await requireUser(request, cfg);
+    requireEditor(user, cfg);
+    const id = tradeId(rawId);
+    const body = await readJson(request);
+    const from = String(body?.from ?? '');
+    const to = String(body?.to ?? '');
+    if (!CONFIG.PLAYER_NAME_PATTERN.test(from) || !CONFIG.PLAYER_NAME_PATTERN.test(to)) {
+        throw new HttpError(400, 'bad_trade', 'Trade needs both player names.');
+    }
+    const list = Array.isArray(body?.items) ? body.items.slice(0, CONFIG.MAX_TRADE_ITEMS) : [];
+    const wanted = new Map();
+    for (const it of list) {
+        let aid = String(it?.armoryId ?? '');
+        if (!CONFIG.ARMORY_ID_PATTERN.test(aid)) {
+            // The other person's items have no ID on the page: match by stats.
+            aid = await armoryIdByFingerprint(cfg.db, cleanFingerprint(it?.fingerprint));
+            if (!aid) continue;
+        }
+        wanted.set(aid, { direction: it?.direction === 'in' ? 'in' : 'out', name: String(it?.itemName ?? '').slice(0, CONFIG.NAME_MAX) });
+    }
+    const eligible = await eligibleTradeItems(cfg.db, [...wanted.keys()]);
+    const now = Date.now();
+    const stmts = [cfg.db.prepare('DELETE FROM trade_log WHERE trade_id = ?1').bind(id)];
+    const logged = [];
+    for (const [aid, w] of wanted) {
+        if (!eligible.has(aid)) continue;
+        // 'out' = from the logger's side to the other player; 'in' = the reverse.
+        const [src, dst] = w.direction === 'in' ? [to, from] : [from, to];
+        const itemName = eligible.get(aid) || w.name;
+        stmts.push(cfg.db.prepare(
+            `INSERT INTO trade_log (trade_id, armory_id, item_name, from_name, to_name, logged_at, logged_by_id, logged_by_name)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`,
+        ).bind(id, aid, itemName, src, dst, now, user.pid, user.name));
+        logged.push({ armoryId: aid, itemName, from: src, to: dst });
+    }
+    if (!logged.length) {
+        return json(request, 200, { logged: [], skipped: [...wanted.keys()] }); // nothing eligible: leave any earlier log alone
+    }
+    await cfg.db.batch(stmts);
+    return json(request, 200, { logged, skipped: [...wanted.keys()].filter((aid) => !eligible.has(aid)) });
+}
+
+/**
+ * DELETE /trades/:tradeId[/:armoryId] - remove a trade's log, or one item.
+ * @param {Request} request - Request.
+ * @param {string} rawId - Trade ID.
+ * @param {string|undefined} rawArmoryId - Optional armory ID.
+ * @param {ReturnType<typeof settings>} cfg - Settings.
+ * @returns {Promise<Response>} { removed }.
+ */
+async function handleTradeDelete(request, rawId, rawArmoryId, cfg) {
+    const user = await requireUser(request, cfg);
+    requireEditor(user, cfg);
+    const id = tradeId(rawId);
+    const stmt = rawArmoryId === undefined
+        ? cfg.db.prepare('DELETE FROM trade_log WHERE trade_id = ?1').bind(id)
+        : cfg.db.prepare('DELETE FROM trade_log WHERE trade_id = ?1 AND armory_id = ?2').bind(id, armoryId(rawArmoryId));
+    const res = await stmt.run();
+    return json(request, 200, { removed: res?.meta?.changes ?? null });
+}
+
+/* ===========================================================================
  * CSV export
  * ======================================================================== */
 
@@ -713,27 +888,41 @@ async function handleExport(request, url, env, cfg) {
          FROM notes n WHERE n.deleted = 0`,
     ).all();
     // Bonus items seen in the faction armory (with or without a note).
-    const { results: itemRows } = await cfg.db.prepare('SELECT * FROM tracked_items').all();
+    const { results: itemRows } = await cfg.db.prepare("SELECT * FROM tracked_items WHERE bonuses <> ''").all();
+    // Latest logged trade per item.
+    const { results: tradeRows } = await cfg.db.prepare(
+        `SELECT t.* FROM trade_log t
+         WHERE t.id = (SELECT t2.id FROM trade_log t2 WHERE t2.armory_id = t.armory_id ORDER BY t2.logged_at DESC, t2.id DESC LIMIT 1)`,
+    ).all();
+    const lastTrade = new Map((tradeRows ?? []).map((t) => [t.armory_id, t]));
 
-    /** One sheet row per armory ID: tracked item and/or note. */
+    /** One sheet row per armory ID. Only weapons/armor with a bonus are listed. */
     const rows = new Map();
     for (const t of itemRows ?? []) rows.set(t.armory_id, { item: t, note: null });
-    for (const n of noteRows ?? []) rows.set(n.armory_id, { item: rows.get(n.armory_id)?.item ?? null, note: n });
+    for (const n of noteRows ?? []) {
+        const item = rows.get(n.armory_id)?.item ?? null;
+        if (item || n.bonuses) rows.set(n.armory_id, { item, note: n });
+    }
     const CATEGORY_NAMES = { Defensive: 'Armor' };
-    const sorted = [...rows.entries()].map(([id, r]) => ({ id, ...r, name: r.item?.item_name || r.note?.item_name || '' }))
-        .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+    const sorted = [...rows.entries()]
+        .map(([id, r]) => ({ id, ...r, name: r.item?.item_name || r.note?.item_name || '' }))
+        // Armory items first, then faction notes on items never seen in the armory.
+        .sort((a, b) => Number(!a.item) - Number(!b.item) || a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
 
-    const header = ['Item', 'Category', 'Label', 'Note', 'Color', 'Armory ID', 'Damage', 'Accuracy', 'Defence', 'Bonuses',
-        'Last edited by', 'Last edited (TCT)', 'Previous edit by', 'Previous edit (TCT)', 'Last seen in armory (TCT)'];
+    const header = ['Item', 'Category', 'Source', 'Label', 'Note', 'Color', 'Armory ID', 'Damage', 'Accuracy', 'Defence', 'Bonuses',
+        'Last edited by', 'Last edited (TCT)', 'Previous edit by', 'Previous edit (TCT)',
+        'Last trade', 'Last trade (TCT)', 'Trade logged by'];
     const lines = [header.map(csvCell).join(',')];
     for (const { id, item, note, name } of sorted) {
         const fp = item?.fingerprint || note?.fingerprint || '';
         const st = statsFromFingerprint(fp);
         const category = item?.category ? (CATEGORY_NAMES[item.category] ?? item.category) : '';
+        const trade = lastTrade.get(id);
         lines.push([
-            name, category, note?.label ?? '', note?.text ?? '', note?.color ?? '', id,
+            name, category, item ? 'Armory' : 'Not in armory', note?.label ?? '', note?.text ?? '', note?.color ?? '', id,
             st.damage, st.accuracy, st.defence, item?.bonuses || note?.bonuses || '',
-            note?.updated_by_name ?? '', tct(note?.updated_at), note?.prev_by ?? '', tct(note?.prev_at), tct(item?.last_seen),
+            note?.updated_by_name ?? '', tct(note?.updated_at), note?.prev_by ?? '', tct(note?.prev_at),
+            trade ? `Traded to ${trade.to_name}` : '', tct(trade?.logged_at), trade?.logged_by_name ?? '',
         ].map(csvCell).join(','));
     }
     return new Response(`${lines.join('\r\n')}\r\n`, {
@@ -776,6 +965,11 @@ export default {
             if (path === '/notes/import' && request.method === 'POST') return await handleImport(request, cfg);
             if (path === '/notes/fingerprints' && request.method === 'POST') return await handleFingerprints(request, cfg);
             if (path === '/items/seen' && request.method === 'POST') return await handleItemsSeen(request, cfg);
+            if (path === '/trades' && request.method === 'GET') return await handleTradeList(request, url, cfg);
+            const t = path.match(/^\/trades\/([^/]+)(?:\/([^/]+))?$/);
+            if (t && !t[2] && request.method === 'GET') return await handleTradeGet(request, t[1], cfg);
+            if (t && !t[2] && request.method === 'POST') return await handleTradeLog(request, t[1], cfg);
+            if (t && request.method === 'DELETE') return await handleTradeDelete(request, t[1], t[2], cfg);
             if (path === '/export.csv' && request.method === 'GET') return await handleExport(request, url, env, cfg);
             const m = path.match(/^\/notes\/([^/]+)$/);
             if (m && request.method === 'PUT') return await handlePut(request, m[1], cfg);

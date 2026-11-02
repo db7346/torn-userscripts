@@ -54,3 +54,20 @@ CREATE TABLE IF NOT EXISTS tracked_items (
     seen_by_id   INTEGER NOT NULL DEFAULT 0,
     seen_by_name TEXT    NOT NULL DEFAULT ''
 );
+
+-- Trades logged by editors ("Log This As Traded" on the trade page).
+-- Only weapons/armor with a bonus that are armory items or have a faction note.
+CREATE TABLE IF NOT EXISTS trade_log (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_id       TEXT    NOT NULL,
+    armory_id      TEXT    NOT NULL,
+    item_name      TEXT    NOT NULL DEFAULT '',
+    from_name      TEXT    NOT NULL DEFAULT '',
+    to_name        TEXT    NOT NULL DEFAULT '',
+    logged_at      INTEGER NOT NULL,               -- epoch ms
+    logged_by_id   INTEGER NOT NULL,
+    logged_by_name TEXT    NOT NULL DEFAULT '',
+    UNIQUE (trade_id, armory_id)
+);
+CREATE INDEX IF NOT EXISTS idx_trade_log_item ON trade_log (armory_id, logged_at);
+CREATE INDEX IF NOT EXISTS idx_trade_log_at ON trade_log (logged_at);
