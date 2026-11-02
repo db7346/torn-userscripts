@@ -38,3 +38,19 @@ CREATE TABLE IF NOT EXISTS note_log (
 );
 
 CREATE INDEX IF NOT EXISTS idx_note_log_item ON note_log (armory_id, at);
+
+-- Weapons/armor with a bonus seen in the faction armory by an editor's browser.
+-- Not notes: nothing shows in game for these. They list every bonus item in the
+-- spreadsheet export, with a blank label until someone adds a note.
+CREATE TABLE IF NOT EXISTS tracked_items (
+    armory_id    TEXT    PRIMARY KEY,
+    item_name    TEXT    NOT NULL DEFAULT '',
+    item_id      TEXT    NOT NULL DEFAULT '',
+    category     TEXT    NOT NULL DEFAULT '',      -- Primary | Secondary | Melee | Defensive
+    fingerprint  TEXT    NOT NULL DEFAULT '',
+    bonuses      TEXT    NOT NULL DEFAULT '',      -- e.g. "22% Execute"
+    first_seen   INTEGER NOT NULL,                 -- epoch ms
+    last_seen    INTEGER NOT NULL,                 -- epoch ms
+    seen_by_id   INTEGER NOT NULL DEFAULT 0,
+    seen_by_name TEXT    NOT NULL DEFAULT ''
+);

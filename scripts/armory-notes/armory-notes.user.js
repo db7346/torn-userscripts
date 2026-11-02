@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Armory Notes
 // @namespace    dadgum.torn.armorynotes
-// @version      2.3.0
+// @version      2.4.0
 // @description  Colored labels and notes on individual weapons and armor (keyed by armory ID). Private notes on the Items page; shared faction notes in the Faction Armory.
 // @author       DadGum
 // @license      MIT
@@ -48,6 +48,10 @@
  * Author: DadGum
  *
  * Changelog
+ *   2.4.0 (2026-11-01) Editors' browsers record every weapon/armor with a
+ *                      bonus seen in the Faction Armory (name, stats,
+ *                      bonuses, last seen) for the faction's spreadsheet.
+ *                      Nothing changes in game for these items.
  *   2.3.0 (2026-11-01) Editors' browsers also record each noted item's
  *                      bonuses ("22% Execute") for the faction's spreadsheet
  *                      export. Stats are not recorded from a half-read row.
@@ -164,6 +168,7 @@
         SHARED_CACHE_KEY: 'tms-armorynotes:shared:v1',
         SEEN_FACTION_KEY: 'tms-armorynotes:seen:v1',
         SETUP_PROMPTED_KEY: 'tms-armorynotes:setup-prompted:v1',
+        ITEMS_SENT_KEY: 'tms-armorynotes:items-sent:v1',
         SHARED_FETCHED_KEY: 'tms-armorynotes:shared-fetched:v1',
         AUTH_FAILURE_KEY: 'tms-armorynotes:auth-failure:v1',
         SHARED_CACHE_VERSION: 1,
@@ -198,6 +203,10 @@
         /** Fingerprints sent per request, and the wait before sending a batch. */
         FINGERPRINT_BATCH: 200,
         FINGERPRINT_FLUSH_MS: 3000,
+        /** Bonus items: re-report an unchanged item after this long (keeps "last seen" fresh). */
+        ITEM_RESEEN_MS: 12 * 60 * 60 * 1000,
+        ITEM_BATCH: 250,
+        ITEMS_SENT_MAX: 5000,
 
         /**
          * Torn API error codes (ApiError schema, Torn API v2). The server passes
@@ -481,6 +490,7 @@
      * @property {boolean} [dynamicIds]                           - IDs come from fingerprints; rows are
      *   rescanned when faction notes change and buttons removed when no note matches.
      * @property {boolean} [backfill]                             - Editors record fingerprints from this page.
+     * @property {boolean} [trackItems]                           - Editors record bonus items from this page.
      * @property {boolean} [anyCategory]                          - Skip the category filter
      *   (pages that only show existing faction notes).
      */
@@ -1472,6 +1482,79 @@
                 const data = await Server.request('POST', '/notes/fingerprints', { body: { items: items.slice(i, i + CONFIG.FINGERPRINT_BATCH) } });
                 if (Array.isArray(data?.notes) && SharedStore.applyOwn(data.notes).length) rescanDynamic();
                 log(`Recorded ${data?.updated ?? 0} fingerprint(s)`);
+            }
+        },
+    };
+
+    /* ---- Bonus items seen in the Faction Armory (editors only) -------------- */
+    // Every weapon/armor with a bonus that an editor's browser sees in the
+    // armory is reported once, then again only if it changes or 12 hours have
+    // passed (to keep "last seen" current). These are not notes: they only
+    // feed the faction's spreadsheet export.
+
+    const ItemSync = {
+        /** @type {Map<string, Object>} */
+        _queue: new Map(),
+        /** @type {{serverUrl: string, items: Object<string, [string, number]>}|null} id -> [key, sentAt] */
+        _sent: null,
+        _timer: 0,
+
+        /**
+         * Load the "already reported" map (reset when the server changes).
+         * @returns {{serverUrl: string, items: Object<string, [string, number]>}} Map.
+         */
+        _load() {
+            const url = SettingsStore.get().serverUrl;
+            if (!this._sent || this._sent.serverUrl !== url) {
+                const stored = Storage.readSafe(CONFIG.ITEMS_SENT_KEY, null);
+                this._sent = stored && stored.serverUrl === url && stored.items && typeof stored.items === 'object'
+                    ? stored
+                    : { serverUrl: url, items: {} };
+            }
+            return this._sent;
+        },
+
+        /**
+         * Report a bonus item if it is new, changed or due for a "last seen" refresh.
+         * @param {string} id - Armory ID.
+         * @param {{itemName: string, itemId: string, category: string, fingerprint: string, bonuses: string}} item - Item.
+         * @returns {void}
+         */
+        offer(id, item) {
+            if (!item.bonuses || !Data.isBonusText(item.bonuses) || !Data.isFingerprint(item.fingerprint)) return;
+            if (!Shared.isActive() || !Shared.canEdit()) return;
+            const key = `${item.fingerprint}\n${item.bonuses}\n${item.itemName}`;
+            const prev = this._load().items[id];
+            if (prev && prev[0] === key && Date.now() - prev[1] < CONFIG.ITEM_RESEEN_MS) return;
+            if (this._queue.has(id)) return;
+            this._queue.set(id, { armoryId: id, ...item, _key: key });
+            clearTimeout(this._timer);
+            this._timer = setTimeout(() => {
+                this.flush().catch((err) => handleSharedError('Faction notes', err, { quiet: true }));
+            }, CONFIG.FINGERPRINT_FLUSH_MS);
+        },
+
+        /**
+         * Send queued items and remember them.
+         * @returns {Promise<void>}
+         * @throws {ServerError} On failure (unsent items are retried on a later view).
+         */
+        async flush() {
+            const items = [...this._queue.values()];
+            this._queue.clear();
+            for (let i = 0; i < items.length; i += CONFIG.ITEM_BATCH) {
+                const chunk = items.slice(i, i + CONFIG.ITEM_BATCH);
+                await Server.request('POST', '/items/seen', { body: { items: chunk.map(({ _key, ...rest }) => rest) } });
+                const sent = this._load();
+                const now = Date.now();
+                for (const it of chunk) sent.items[it.armoryId] = [it._key, now];
+                const ids = Object.keys(sent.items);
+                if (ids.length > CONFIG.ITEMS_SENT_MAX) {
+                    ids.sort((a, b) => sent.items[a][1] - sent.items[b][1]);
+                    for (const old of ids.slice(0, ids.length - CONFIG.ITEMS_SENT_MAX)) delete sent.items[old];
+                }
+                Storage.write(CONFIG.ITEMS_SENT_KEY, sent);
+                log(`Reported ${chunk.length} bonus item(s)`);
             }
         },
     };
@@ -3052,6 +3135,7 @@ ${colorRules}
         getName: (row) => ownText(row.querySelector(CONFIG.SEL.FACTION_NAME)),
         getStats: (row) => statsFromIcons(row.querySelector(CONFIG.SEL.FACTION_STATS)),
         backfill: true,
+        trackItems: true,
         mounts: [
             {
                 kind: 'faction',
@@ -3211,6 +3295,12 @@ ${colorRules}
         if (adapter === FACTION_ADAPTER) SeenIds.add(id);
         const { fp, bonuses } = rowItemInfo(row, adapter);
         if (adapter.backfill && fp) FingerprintSync.offer(id, fp, bonuses);
+        if (adapter.trackItems && fp && bonuses) {
+            ItemSync.offer(id, {
+                itemName: adapter.getName(row), itemId: adapter.getItemId(row),
+                category: adapter.getCategory(row) ?? '', fingerprint: fp, bonuses,
+            });
+        }
 
         for (const spec of adapter.mounts) {
             const host = spec.findHost(row);

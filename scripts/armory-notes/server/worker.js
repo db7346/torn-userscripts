@@ -9,7 +9,10 @@
  *   POST   /notes/import         editors: bulk upload { notes: [...] } (never overwrites)
  *   POST   /notes/fingerprints   editors: record item stat fingerprints and bonuses
  *                                { items: [{ armoryId, fingerprint, bonuses }] }
- *   GET    /export.csv?token=    live notes as CSV for a spreadsheet (needs the
+ *   POST   /items/seen           editors: record bonus items seen in the faction armory
+ *                                { items: [{ armoryId, itemName, itemId, category,
+ *                                            fingerprint, bonuses }] }
+ *   GET    /export.csv?token=    tracked items + notes as CSV for a spreadsheet (needs the
  *                                EXPORT_TOKEN secret; off when it is not set)
  *
  * Sync: clients poll with ?since=<changed>. `changed_at` moves on every change
@@ -51,6 +54,8 @@ const CONFIG = Object.freeze({
     /** Readable bonus text, e.g. "22% Execute, 34% Stricken". */
     BONUSES_MAX: 200,
     EXPORT_TOKEN_MIN: 16,
+    MAX_SEEN: 500,
+    CATEGORIES: Object.freeze(['Primary', 'Secondary', 'Melee', 'Defensive']),
     API_KEY_PATTERN: /^[A-Za-z0-9]{16}$/,
 });
 
@@ -589,6 +594,50 @@ async function handleFingerprints(request, cfg) {
     return json(request, 200, { updated: notes.length, notes });
 }
 
+/**
+ * POST /items/seen - record weapons/armor with a bonus seen in the faction
+ * armory (editors). These are not notes: nothing shows in game for them;
+ * they list every bonus item in the spreadsheet, with a blank label until
+ * someone adds a note. Each call refreshes last_seen.
+ * @param {Request} request - Request.
+ * @param {ReturnType<typeof settings>} cfg - Settings.
+ * @returns {Promise<Response>} Response with the count recorded.
+ */
+async function handleItemsSeen(request, cfg) {
+    const user = await requireUser(request, cfg);
+    requireEditor(user, cfg);
+    const body = await readJson(request);
+    const list = Array.isArray(body?.items) ? body.items : null;
+    if (!list) throw new HttpError(400, 'bad_items', 'Expected { items: [...] }.');
+    if (list.length > CONFIG.MAX_SEEN) throw new HttpError(413, 'too_many', `At most ${CONFIG.MAX_SEEN} items per request.`);
+
+    const now = Date.now();
+    const stmts = [];
+    const seen = new Set();
+    for (const raw of list) {
+        const id = String(raw?.armoryId ?? '');
+        const bonuses = cleanBonuses(raw?.bonuses);
+        if (!CONFIG.ARMORY_ID_PATTERN.test(id) || !bonuses || seen.has(id)) continue; // bonus items only
+        seen.add(id);
+        const category = CONFIG.CATEGORIES.includes(raw?.category) ? raw.category : '';
+        const itemId = /^\d{1,10}$/.test(String(raw?.itemId ?? '')) ? String(raw.itemId) : '';
+        stmts.push(cfg.db.prepare(
+            `INSERT INTO tracked_items (armory_id, item_name, item_id, category, fingerprint, bonuses,
+                                        first_seen, last_seen, seen_by_id, seen_by_name)
+             VALUES (?1, ?2, ?3, ?4, COALESCE(?5, ''), ?6, ?7, ?7, ?8, ?9)
+             ON CONFLICT(armory_id) DO UPDATE SET
+               item_name = CASE WHEN excluded.item_name <> '' THEN excluded.item_name ELSE tracked_items.item_name END,
+               item_id = CASE WHEN excluded.item_id <> '' THEN excluded.item_id ELSE tracked_items.item_id END,
+               category = CASE WHEN excluded.category <> '' THEN excluded.category ELSE tracked_items.category END,
+               fingerprint = COALESCE(?5, tracked_items.fingerprint), bonuses = excluded.bonuses,
+               last_seen = excluded.last_seen, seen_by_id = excluded.seen_by_id, seen_by_name = excluded.seen_by_name`,
+        ).bind(id, String(raw?.itemName ?? '').slice(0, CONFIG.NAME_MAX), itemId, category,
+            cleanFingerprint(raw?.fingerprint), bonuses, now, user.pid, user.name));
+    }
+    for (let i = 0; i < stmts.length; i += 100) await cfg.db.batch(stmts.slice(i, i + 100));
+    return json(request, 200, { recorded: stmts.length });
+}
+
 /* ===========================================================================
  * CSV export
  * ======================================================================== */
@@ -656,22 +705,35 @@ async function handleExport(request, url, env, cfg) {
     if (expected.length < CONFIG.EXPORT_TOKEN_MIN) throw new HttpError(404, 'not_found', 'Not found.');
     if (!safeEqual(url.searchParams.get('token') ?? '', expected)) throw new HttpError(403, 'bad_token', 'Invalid export token.');
 
-    // Previous edit = the second-latest change in the history log.
-    const { results } = await cfg.db.prepare(
+    // Live notes. Previous edit = the second-latest change in the history log.
+    const { results: noteRows } = await cfg.db.prepare(
         `SELECT n.*,
            (SELECT by_name FROM note_log l WHERE l.armory_id = n.armory_id ORDER BY at DESC, id DESC LIMIT 1 OFFSET 1) AS prev_by,
            (SELECT at      FROM note_log l WHERE l.armory_id = n.armory_id ORDER BY at DESC, id DESC LIMIT 1 OFFSET 1) AS prev_at
-         FROM notes n WHERE n.deleted = 0 ORDER BY n.item_name, n.label, n.armory_id`,
+         FROM notes n WHERE n.deleted = 0`,
     ).all();
+    // Bonus items seen in the faction armory (with or without a note).
+    const { results: itemRows } = await cfg.db.prepare('SELECT * FROM tracked_items').all();
 
-    const header = ['Item', 'Label', 'Note', 'Color', 'Armory ID', 'Damage', 'Accuracy', 'Defence', 'Bonuses',
-        'Last edited by', 'Last edited (TCT)', 'Previous edit by', 'Previous edit (TCT)'];
+    /** One sheet row per armory ID: tracked item and/or note. */
+    const rows = new Map();
+    for (const t of itemRows ?? []) rows.set(t.armory_id, { item: t, note: null });
+    for (const n of noteRows ?? []) rows.set(n.armory_id, { item: rows.get(n.armory_id)?.item ?? null, note: n });
+    const CATEGORY_NAMES = { Defensive: 'Armor' };
+    const sorted = [...rows.entries()].map(([id, r]) => ({ id, ...r, name: r.item?.item_name || r.note?.item_name || '' }))
+        .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+
+    const header = ['Item', 'Category', 'Label', 'Note', 'Color', 'Armory ID', 'Damage', 'Accuracy', 'Defence', 'Bonuses',
+        'Last edited by', 'Last edited (TCT)', 'Previous edit by', 'Previous edit (TCT)', 'Last seen in armory (TCT)'];
     const lines = [header.map(csvCell).join(',')];
-    for (const r of results ?? []) {
-        const st = statsFromFingerprint(r.fingerprint);
+    for (const { id, item, note, name } of sorted) {
+        const fp = item?.fingerprint || note?.fingerprint || '';
+        const st = statsFromFingerprint(fp);
+        const category = item?.category ? (CATEGORY_NAMES[item.category] ?? item.category) : '';
         lines.push([
-            r.item_name, r.label, r.text, r.color, r.armory_id, st.damage, st.accuracy, st.defence, r.bonuses ?? '',
-            r.updated_by_name, tct(r.updated_at), r.prev_by ?? '', tct(r.prev_at),
+            name, category, note?.label ?? '', note?.text ?? '', note?.color ?? '', id,
+            st.damage, st.accuracy, st.defence, item?.bonuses || note?.bonuses || '',
+            note?.updated_by_name ?? '', tct(note?.updated_at), note?.prev_by ?? '', tct(note?.prev_at), tct(item?.last_seen),
         ].map(csvCell).join(','));
     }
     return new Response(`${lines.join('\r\n')}\r\n`, {
@@ -713,6 +775,7 @@ export default {
             if (path === '/notes' && request.method === 'GET') return await handleList(request, url, cfg);
             if (path === '/notes/import' && request.method === 'POST') return await handleImport(request, cfg);
             if (path === '/notes/fingerprints' && request.method === 'POST') return await handleFingerprints(request, cfg);
+            if (path === '/items/seen' && request.method === 'POST') return await handleItemsSeen(request, cfg);
             if (path === '/export.csv' && request.method === 'GET') return await handleExport(request, url, env, cfg);
             const m = path.match(/^\/notes\/([^/]+)$/);
             if (m && request.method === 'PUT') return await handlePut(request, m[1], cfg);
