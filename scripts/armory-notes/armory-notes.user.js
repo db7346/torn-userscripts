@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Armory Notes
 // @namespace    dadgum.torn.armorynotes
-// @version      2.6.0
+// @version      2.6.1
 // @description  Colored labels and notes on individual weapons and armor (keyed by armory ID). Private notes on the Items page; shared faction notes in the Faction Armory.
 // @author       DadGum
 // @license      MIT
@@ -48,6 +48,9 @@
  * Author: DadGum
  *
  * Changelog
+ *   2.6.1 (2026-11-01) "Sync armory now" within 5 minutes of the last sync now
+ *                      shows a plain notice that the results are current,
+ *                      instead of an error.
  *   2.6.0 (2026-11-01) "Sync armory now (editors)" menu item: the faction's
  *                      server reads the whole armory from the Torn API
  *                      (normally every 6 hours) for the spreadsheet and view
@@ -3275,6 +3278,12 @@ ${colorRules}
             if (r.remainingToLookUp) parts.push(`${r.remainingToLookUp} more to look up next sync`);
             Notice.show(`${parts.join(', ')}. The spreadsheet updates within an hour; the view page right away.`);
         } catch (err) {
+            // The server allows one sync per 5 minutes. Hitting that limit is not a
+            // failure: the last sync's results are already in place.
+            if (err instanceof ServerError && err.code === 'sync_cooldown') {
+                Notice.show('The armory was synced less than 5 minutes ago, so the results are already current.');
+                return;
+            }
             handleSharedError('Armory sync', err);
         }
     }
