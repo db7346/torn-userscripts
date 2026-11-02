@@ -94,6 +94,7 @@ That is about **1 Torn API call per 12 hours**, and about **1.3 server requests 
 
 ## Changelog
 
+- **Server update (no script change)**: an item an editor logged as received, but not yet deposited, now shows **Returned to <editor> (not deposited)** instead of "Traded to <editor>" (yellow on the view page, new status filter).
 - **2.6.1**: Clicking **Sync armory now** again within 5 minutes shows a plain "results are already current" notice instead of an error.
 - **2.6.0**: Armory sync: the faction's server can read the whole armory from the Torn API every 6 hours (notes admin's own Limited key, see SETUP.md), giving exact **Status** (In armory / Traded to X / Missing since …) and **Loaned to**. Weapons and armor are separate tabs on the view page and separate exports (`&type=weapons` / `&type=armor`). New menu item **Sync armory now (editors)**. Needs migration `0005_armory_sync.sql`.
 - **Server update (no script change)**: shareable read-only web page at `/view?key=…` (needs the `VIEW_TOKEN` secret, see SETUP.md), with search, filters, sorting and click-to-show editor history.

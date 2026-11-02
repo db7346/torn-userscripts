@@ -913,6 +913,17 @@ function itemType(category, fp) {
 }
 
 /**
+ * Whether a logged trade brought the item TO the editor who logged it
+ * (logged with direction 'in'). Only trade parties can log a trade, so the
+ * receiver being the logger means the item came back to the faction side.
+ * @param {{to_name: string, logged_by_name: string}} trade - trade_log row.
+ * @returns {boolean} True for an incoming item.
+ */
+function isIncomingTrade(trade) {
+    return String(trade.to_name ?? '').toLowerCase() === String(trade.logged_by_name ?? '').toLowerCase();
+}
+
+/**
  * One row per weapon/armor with a bonus: armory items first, then bonus items
  * with a faction note that were never seen in the armory. Shared by the CSV
  * export and the view page.
@@ -974,8 +985,14 @@ async function sheetRows(cfg) {
                     status = 'In armory';
                     statusKind = 'in';
                 } else if (trade && trade.logged_at >= (missingSince ?? 0) - CONFIG.TRADE_GRACE_MS) {
-                    status = `Traded to ${trade.to_name}`;
-                    statusKind = 'traded';
+                    if (isIncomingTrade(trade)) {
+                        // An editor logged receiving it: they hold it until they deposit it.
+                        status = `Returned to ${trade.to_name} (not deposited)`;
+                        statusKind = 'returned';
+                    } else {
+                        status = `Traded to ${trade.to_name}`;
+                        statusKind = 'traded';
+                    }
                 } else {
                     status = `Missing since ${tct(missingSince).slice(0, 10)}`;
                     statusKind = 'missing';

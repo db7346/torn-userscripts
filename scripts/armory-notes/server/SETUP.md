@@ -124,7 +124,7 @@ For separate tabs, use `&type=weapons` and `&type=armor` on the export link (one
 | Column | |
 |---|---|
 | Item, Category | The item (Category on the weapons/all export only) |
-| Status | **In armory**, **Traded to X** (gone, with a logged trade), **Missing since …** (gone, no logged trade), or **Not in armory** (a faction note on an item never seen in the armory) |
+| Status | **In armory**, **Traded to X** (gone, with a logged trade), **Returned to X (not deposited)** (an editor logged receiving it but hasn't put it back in the armory yet), **Missing since …** (gone, no logged trade), or **Not in armory** (a faction note on an item never seen in the armory) |
 | Loaned to | Who the item is loaned to (needs the armory sync) |
 | Label, Note, Color, Armory ID | The faction note, if any |
 | Damage, Accuracy / Defence, Bonuses | The item's stats, recorded automatically by editors' browsers |
@@ -134,7 +134,7 @@ For separate tabs, use `&type=weapons` and `&type=armor` on the export link (one
 
 ### Logging trades
 
-Editors see a **Log This As Traded** checkbox in the "This trade expires…" bar on a trade. Ticking it logs that trade's bonus weapons and armor that are armory items or have a faction note: yours as "Traded to <them>", theirs (matched by stats) as "Traded to <you>". Other items are ignored. Untick it to remove the log.
+Editors see a **Log This As Traded** checkbox in the "This trade expires…" bar on a trade. Ticking it logs that trade's bonus weapons and armor that are armory items or have a faction note: yours as "Traded to <them>", theirs (matched by stats) as "Traded to <you>". Other items are ignored. While an item you received is still out of the armory, its Status reads **Returned to <you> (not deposited)**; the next armory sync after you deposit it changes that to **In armory**. Untick it to remove the log.
 
 To fix a mistake later, use **Tampermonkey menu > Trade log (editors)**: it lists recent logged trades with a **Remove** button per item and per trade. The sheet itself is read-only (Google re-imports it), so make corrections there, not in the sheet.
 
