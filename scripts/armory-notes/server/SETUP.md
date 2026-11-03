@@ -104,6 +104,8 @@ Some releases change the database. Run each new file in [`migrations/`](migratio
 
 New databases created from `schema.sql` already include every migration.
 
+When a server change needs a newer script, raise `MIN_SCRIPT_VERSION` in `worker.js`. Members on an older script then see an update notice with a link, at most once a day (scripts from 2.8.0 on).
+
 ## Live spreadsheet (optional)
 
 The server can publish the live faction notes as a spreadsheet feed for Google Sheets. It's off until you set a token.

@@ -4,9 +4,11 @@ import { viewHtml } from './view.mjs';
  * Torn Armory Notes - shared faction notes server (Cloudflare Worker + D1).
  *
  * Endpoints (JSON in, JSON out):
- *   POST   /auth                 { key }  -> { token, expiresAt, player, faction, canEdit, isAdmin }
+ *   POST   /auth                 { key }  -> { token, expiresAt, player, faction, canEdit, isAdmin,
+ *                                           minScriptVersion }
  *   GET    /notes?since=<ms>     faction members: notes changed at/after <ms> (0 = all live notes);
- *                                editors also get { sync } (armory sync health)
+ *                                editors also get { sync } (armory sync health); everyone gets
+ *                                minScriptVersion (older scripts tell the member to update)
  *   PUT    /notes/:armoryId      editors: create/update one note
  *   DELETE /notes/:armoryId      editors: delete one note
  *   POST   /notes/import         editors: bulk upload { notes: [...] } (never overwrites)
@@ -20,6 +22,8 @@ import { viewHtml } from './view.mjs';
  *   POST   /trades/:tradeId      editors: log a trade { from, to, items: [{ armoryId or
  *                                fingerprint, itemName, direction: 'out'|'in' }] }
  *                                (replaces earlier log; fingerprints are matched here)
+ *   POST   /trades/:tradeId/check editors: which of { items } would be logged (read-only;
+ *                                drives the "log this trade?" reminder)
  *   DELETE /trades/:tradeId[/:armoryId]  editors: remove a trade's log (or one item)
  *   POST   /armory/sync          editors: run the armory sync now (5-minute cooldown)
  *   GET    /admin/editors        admin: editor list + faction member list (?refresh=1 reloads members)
@@ -100,6 +104,8 @@ const CONFIG = Object.freeze({
     /** Faction member list (for "Manage editors") is cached this long. */
     MEMBERS_TTL_MS: 12 * 60 * 60 * 1000,
     MAX_EDITORS: 200,
+    /** Scripts older than this tell the member (once a day) to update. Raise it when a server change needs a newer script. */
+    MIN_SCRIPT_VERSION: '2.8.0',
     /** A trade logged up to this long before an item disappeared counts as the reason it left. */
     TRADE_GRACE_MS: 7 * 24 * 60 * 60 * 1000,
     /** Without the sync: an item counts as missing once other items of its type were seen this much later. */
@@ -498,6 +504,7 @@ async function handleAuth(request, cfg) {
         faction: { id: fid, name: String(data.faction?.name ?? '') },
         canEdit: await isEditor(pid, cfg),
         isAdmin: cfg.adminId !== 0 && pid === cfg.adminId,
+        minScriptVersion: CONFIG.MIN_SCRIPT_VERSION,
     });
 }
 
@@ -522,6 +529,7 @@ async function handleList(request, url, env, cfg) {
         serverTime: Date.now(),
         canEdit,
         isAdmin: cfg.adminId !== 0 && user.pid === cfg.adminId,
+        minScriptVersion: CONFIG.MIN_SCRIPT_VERSION,
         notes: (results ?? []).map(rowToNote),
         hasMore: (results ?? []).length >= CONFIG.MAX_RESULTS,
         // Editors get the armory sync health, so their script can warn when it breaks.
@@ -888,18 +896,7 @@ async function handleTradeLog(request, rawId, cfg) {
     if (!CONFIG.PLAYER_NAME_PATTERN.test(from) || !CONFIG.PLAYER_NAME_PATTERN.test(to)) {
         throw new HttpError(400, 'bad_trade', 'Trade needs both player names.');
     }
-    const list = Array.isArray(body?.items) ? body.items.slice(0, CONFIG.MAX_TRADE_ITEMS) : [];
-    const wanted = new Map();
-    for (const it of list) {
-        let aid = String(it?.armoryId ?? '');
-        if (!CONFIG.ARMORY_ID_PATTERN.test(aid)) {
-            // The other person's items have no ID on the page: match by stats.
-            aid = await armoryIdByFingerprint(cfg.db, cleanFingerprint(it?.fingerprint));
-            if (!aid) continue;
-        }
-        wanted.set(aid, { direction: it?.direction === 'in' ? 'in' : 'out', name: String(it?.itemName ?? '').slice(0, CONFIG.NAME_MAX) });
-    }
-    const eligible = await eligibleTradeItems(cfg.db, [...wanted.keys()]);
+    const { wanted, eligible } = await resolveTradeItems(cfg, body);
     const now = Date.now();
     const stmts = [cfg.db.prepare('DELETE FROM trade_log WHERE trade_id = ?1').bind(id)];
     const logged = [];
@@ -920,6 +917,50 @@ async function handleTradeLog(request, rawId, cfg) {
     await cfg.db.batch(stmts);
     await markSyncWanted(cfg);
     return json(request, 200, { logged, skipped: [...wanted.keys()].filter((aid) => !eligible.has(aid)) });
+}
+
+/**
+ * Turn a trade's item list into armory IDs (yours by ID, theirs matched by
+ * stats) and find the ones that count: bonus items from the armory or with a
+ * faction note.
+ * @param {ReturnType<typeof settings>} cfg - Settings.
+ * @param {{items?: Object[]}} body - Request body.
+ * @returns {Promise<{wanted: Map<string, {direction: string, name: string}>, eligible: Map<string, string>}>}
+ *   All matched items, and the eligible ones (armory ID -> item name).
+ */
+async function resolveTradeItems(cfg, body) {
+    const list = Array.isArray(body?.items) ? body.items.slice(0, CONFIG.MAX_TRADE_ITEMS) : [];
+    const wanted = new Map();
+    for (const it of list) {
+        let aid = String(it?.armoryId ?? '');
+        if (!CONFIG.ARMORY_ID_PATTERN.test(aid)) {
+            // The other person's items have no ID on the page: match by stats.
+            aid = await armoryIdByFingerprint(cfg.db, cleanFingerprint(it?.fingerprint));
+            if (!aid) continue;
+        }
+        wanted.set(aid, { direction: it?.direction === 'in' ? 'in' : 'out', name: String(it?.itemName ?? '').slice(0, CONFIG.NAME_MAX) });
+    }
+    const eligible = await eligibleTradeItems(cfg.db, [...wanted.keys()]);
+    return { wanted, eligible };
+}
+
+/**
+ * POST /trades/:tradeId/check - which items of this trade would be logged
+ * (read-only; the script highlights "Log This As Traded" when there are any).
+ * @param {Request} request - Request.
+ * @param {string} rawId - Trade ID.
+ * @param {ReturnType<typeof settings>} cfg - Settings.
+ * @returns {Promise<Response>} { items: [{ armoryId, itemName }] }.
+ */
+async function handleTradeCheck(request, rawId, cfg) {
+    const user = await requireUser(request, cfg);
+    await requireEditor(user, cfg);
+    tradeId(rawId);
+    const { wanted, eligible } = await resolveTradeItems(cfg, await readJson(request));
+    const items = [...wanted.entries()]
+        .filter(([aid]) => eligible.has(aid))
+        .map(([aid, w]) => ({ armoryId: aid, itemName: eligible.get(aid) || w.name }));
+    return json(request, 200, { items });
 }
 
 /**
@@ -1601,6 +1642,7 @@ export default {
             const t = path.match(/^\/trades\/([^/]+)(?:\/([^/]+))?$/);
             if (t && !t[2] && request.method === 'GET') return await handleTradeGet(request, t[1], cfg);
             if (t && !t[2] && request.method === 'POST') return await handleTradeLog(request, t[1], cfg);
+            if (t && t[2] === 'check' && request.method === 'POST') return await handleTradeCheck(request, t[1], cfg);
             if (t && request.method === 'DELETE') return await handleTradeDelete(request, t[1], t[2], cfg);
             if (path === '/export.csv' && request.method === 'GET') return await handleExport(request, url, env, cfg);
             if (path === '/view' && request.method === 'GET') return await handleView(request, url, env, cfg);

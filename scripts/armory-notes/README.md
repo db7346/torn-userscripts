@@ -12,7 +12,7 @@ Attach a colored label and a note to individual weapons and armor. Notes are tie
 - A tag button next to every Primary, Secondary, Melee and Armor item
 - Click it to add a short label (up to 16 characters), pick one of 8 colors, and write a note (up to 1,000 characters)
 - The label shows as a colored pill; hover it to read the full note
-- **Faction Armory:** shared faction notes, refreshed every 45 seconds while the tab is visible. Hover shows who edited a note last and when.
+- **Faction Armory:** shared faction notes, refreshed every 45 seconds while the tab is visible. Hover shows who edited a note last and when. A **filter bar** above the list searches item names, labels and notes, or shows **Tagged only** / **Untagged bonus items** (on the page currently shown).
 - **Items page:** your private notes (row and thumbnail views), plus a faction pill (with a people icon) when an item has a faction note. Editors can click it to edit or delete the faction note, which is handy for items in your own inventory; everyone else sees it read-only.
 - **Trade pages:** faction notes show read-only on your own items, in the trade view, on the add-items screen and on its confirmation step, and on **the other person's items** in the trade view (matched by the item's stats), so you can see a faction-owned item before you send it
 - **Live spreadsheet** (optional, set up by the notes admin): every bonus weapon and armor piece in the Faction Armory, plus every faction note, with stats, bonuses, last edit, previous edit and last seen, in Google Sheets
@@ -69,6 +69,7 @@ The script never calls the Torn API itself. It talks only to your faction's note
 | Sign in (`POST /auth`) | About once every 12 hours | `GET /v2/user?selections=basic,faction` (Public key), tagged `comment=ArmoryNotes` |
 | Fetch changes (`GET /notes`) | Every 45 s while the Faction Armory is open and visible; once on Items page load if the cache is over a minute old | None |
 | Save, delete, upload | When you click | None |
+| Trade check (`POST /trades/:id/check`, editors) | Once per trade page, and again only if the trade's items change | None |
 
 That is about **1 Torn API call per 12 hours**, and about **1.3 server requests a minute** while the armory is open. The script caps itself at 30 server requests a minute and backs off after errors. A bad key or a non-member is checked with Torn only once per page load.
 
@@ -91,10 +92,12 @@ That is about **1 Torn API call per 12 hours**, and about **1.3 server requests 
 - Local notes are per browser. Use Export/Import to move them.
 - In the Faction Armory, a long item name truncates to make room for the label pill.
 - The faction Deposit list is not covered, because its markup has no armory IDs.
+- The armory filter only searches the page Torn is showing; items on other armory pages are not searched (use the view page for the whole armory).
 - Faction rows are classified by the text of the "Type" column. If Torn renames those values, buttons there disappear until the script is updated.
 
 ## Changelog
 
+- **2.8.0**: Filter bar above the Faction Armory list (everyone). Editors: **Log This As Traded** is highlighted, with a count, when a trade holds faction items that aren't logged yet. Scripts older than the version the faction's server needs show an update notice with a link, at most once a day.
 - **2.7.0**: **Manage editors (admin)**: the notes admin (set once as `ADMIN_ID` on the server) adds and removes editors from the script, no Cloudflare visit needed. Editors on the Faction Armory get a warning when the armory sync failed or is more than 12 hours old. The server re-syncs the armory about 15 minutes after a trade is logged or removed. Needs migration `0006_editors.sql` and the `ADMIN_ID` variable.
 - **2.6.2**: Menu item **Clear faction notes cache** renamed to **Reload faction notes (fix stale data)**, since it deletes nothing.
 - **Server update (no script change)**: view page shows Damage/Accuracy (Defence for armor) as small DMG/ACC/DEF chips beside the item name instead of separate columns, with a **Sort by stat** menu (high→low or low→high).

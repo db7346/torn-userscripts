@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Armory Notes
 // @namespace    dadgum.torn.armorynotes
-// @version      2.7.0
+// @version      2.8.0
 // @description  Colored labels and notes on individual weapons and armor (keyed by armory ID). Private notes on the Items page; shared faction notes in the Faction Armory.
 // @author       DadGum
 // @license      MIT
@@ -13,6 +13,7 @@
 // @grant        GM_registerMenuCommand
 // @grant        GM_addStyle
 // @grant        GM_xmlhttpRequest
+// @grant        GM_info
 // @connect      workers.dev
 // @run-at       document-idle
 // @homepageURL  https://github.com/db7346/torn-userscripts/tree/main/scripts/armory-notes
@@ -48,6 +49,11 @@
  * Author: DadGum
  *
  * Changelog
+ *   2.8.0 (2026-11-02) Filter bar above the Faction Armory list (search item,
+ *                      label or note; Tagged only / Untagged bonus items).
+ *                      Editors: "Log This As Traded" is highlighted when a
+ *                      trade holds faction items and isn't logged yet.
+ *                      Out-of-date scripts show an update notice once a day.
  *   2.7.0 (2026-11-02) "Manage editors (admin)" menu item: the notes admin
  *                      (ADMIN_ID on the server) adds and removes editors from
  *                      a faction member list, effective immediately. Editors
@@ -201,6 +207,10 @@
         SEEN_FACTION_KEY: 'tms-armorynotes:seen:v1',
         SETUP_PROMPTED_KEY: 'tms-armorynotes:setup-prompted:v1',
         ITEMS_SENT_KEY: 'tms-armorynotes:items-sent:v1',
+        /** When the "please update" notice was last shown (epoch ms). */
+        UPDATE_NAG_KEY: 'tms-armorynotes:update-nag:v1',
+        UPDATE_NAG_MS: 24 * 60 * 60 * 1000,
+        INSTALL_URL: 'https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/armory-notes/armory-notes.user.js',
         SHARED_FETCHED_KEY: 'tms-armorynotes:shared-fetched:v1',
         AUTH_FAILURE_KEY: 'tms-armorynotes:auth-failure:v1',
         SHARED_CACHE_VERSION: 1,
@@ -288,6 +298,8 @@
         OBSERVER_DEBOUNCE_MS: 150,
         WAIT_FOR_TIMEOUT_MS: 15000,
         NOTICE_MS: 4000,
+        /** Delay before re-applying the armory filter after buttons change. */
+        FILTER_DEBOUNCE_MS: 60,
 
         /** Layout sizes (px). */
         ITEMS_PILL_MAX_PX: 110,
@@ -319,6 +331,9 @@
             // Faction armory (factions.php#/tab=armoury)
             FACTION_ROOT: '#faction-armoury',
             FACTION_ROW: 'ul.item-list > li',
+            /** The armory list, and its header row (the filter bar goes above the header). */
+            FACTION_LIST: 'ul.item-list',
+            FACTION_LIST_TITLE: 'ul.list-title',
             FACTION_ID_HOLDER: ':scope > .img-wrap[data-armoryid]',
             FACTION_NAME: ':scope > .name',
             // Fragile: category is read from the visible "Type" column text.
@@ -375,6 +390,9 @@
         /** Marks any element this script adds (so observers ignore it). */
         own: `${PREFIX}-own`,
         logBox: `${PREFIX}-logbox`,
+        logBoxNudge: `${PREFIX}-logbox--nudge`,
+        filterBar: `${PREFIX}-filter`,
+        rowHidden: `${PREFIX}-row--hidden`,
         logHost: `${PREFIX}-loghost`,
         logGroup: `${PREFIX}-loggroup`,
         logItem: `${PREFIX}-logitem`,
@@ -820,6 +838,22 @@
          */
         isApiKeyFormat(key) {
             return CONFIG.API_KEY_PATTERN.test(String(key ?? ''));
+        },
+
+        /**
+         * Compare two dotted version strings numerically ("2.10.0" > "2.9.1").
+         * @param {string} a - Version.
+         * @param {string} b - Version.
+         * @returns {number} -1, 0 or 1.
+         */
+        compareVersions(a, b) {
+            const pa = String(a).split('.').map((x) => Number.parseInt(x, 10) || 0);
+            const pb = String(b).split('.').map((x) => Number.parseInt(x, 10) || 0);
+            for (let i = 0; i < Math.max(pa.length, pb.length); i += 1) {
+                const d = (pa[i] ?? 0) - (pb[i] ?? 0);
+                if (d) return d < 0 ? -1 : 1;
+            }
+            return 0;
         },
 
         /**
@@ -1387,6 +1421,7 @@
                 if (typeof data.canEdit === 'boolean') Session.setCanEdit(data.canEdit);
                 if (typeof data.isAdmin === 'boolean') Session.setIsAdmin(data.isAdmin);
                 if (data.sync && typeof data.sync === 'object') SyncHealth.update(data.sync);
+                UpdateCheck.check(data.minScriptVersion);
                 if (!data.hasMore) break;
             }
             this._fetchedAt = Date.now();
@@ -1804,6 +1839,43 @@
         },
     };
 
+    /**
+     * Tells members on an old script to update, at most once a day. The server
+     * sends the oldest version it supports with sign-in and with the notes.
+     */
+    const UpdateCheck = {
+        /**
+         * This script's installed version (Tampermonkey's GM_info; '' if unavailable).
+         * @returns {string} Version.
+         */
+        current() {
+            try {
+                return typeof GM_info !== 'undefined' ? String(GM_info?.script?.version ?? '') : '';
+            } catch {
+                return '';
+            }
+        },
+
+        /**
+         * Show the update notice if this script is older than `minVersion`
+         * and the notice was not shown in the last 24 hours.
+         * @param {unknown} minVersion - From the server.
+         * @returns {void}
+         */
+        check(minVersion) {
+            const cur = this.current();
+            if (typeof minVersion !== 'string' || !minVersion || !cur) return;
+            if (Data.compareVersions(cur, minVersion) >= 0) return;
+            const now = Date.now();
+            if (now - (Number(Storage.readSafe(CONFIG.UPDATE_NAG_KEY, 0)) || 0) < CONFIG.UPDATE_NAG_MS) return;
+            Storage.write(CONFIG.UPDATE_NAG_KEY, now);
+            Notice.show(`This script (version ${cur}) is out of date; your faction's server needs ${minVersion} or newer.`, true, {
+                link: { text: 'Update now', href: CONFIG.INSTALL_URL },
+                ms: CONFIG.NOTICE_MS * 4,
+            });
+        },
+    };
+
     const Session = {
         /** @type {Session|null} */
         _mem: null,
@@ -1953,6 +2025,7 @@
                 serverUrl: settings.serverUrl,
             };
             this.clearFailure();
+            UpdateCheck.check(data.minScriptVersion);
             this._mem = session;
             Storage.write(CONFIG.SESSION_KEY, session);
             log('Signed in as', session.player.name, session.canEdit ? '(editor)' : '(viewer)');
@@ -2173,6 +2246,16 @@ ${colorRules}
 .${CLS.notices}{position:fixed;right:16px;bottom:16px;z-index:${z + 3};display:flex;flex-direction:column;gap:6px;}
 .${CLS.notice}{padding:8px 10px;max-width:320px;${panel}}
 .${CLS.noticeError}{border-color:#d9534f;}
+.${CLS.notice} a{color:#79c0ff;text-decoration:underline;}
+.${CLS.logBoxNudge}{border-color:#e3b341;background:rgba(227,179,65,.25);box-shadow:0 0 0 2px rgba(227,179,65,.45);}
+.${CLS.filterBar}{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:6px 8px;font:12px Arial,Helvetica,sans-serif;
+  color:inherit;border-bottom:1px solid rgba(128,128,128,.35);}
+.${CLS.filterBar} input,.${CLS.filterBar} select{font:12px Arial,Helvetica,sans-serif;color:inherit;background:transparent;
+  border:1px solid rgba(128,128,128,.55);border-radius:4px;padding:3px 6px;}
+.${CLS.filterBar} input{flex:1 1 180px;min-width:120px;}
+.${CLS.filterBar} select option{color:#000;}
+.${CLS.filterBar} span{opacity:.75;margin-left:auto;white-space:nowrap;}
+.${CLS.rowHidden}{display:none !important;}
 `);
     }
 
@@ -2260,16 +2343,20 @@ ${colorRules}
          * Show a small, auto-dismissing message.
          * @param {string} message - Text to show.
          * @param {boolean} [isError=false] - Style as an error.
+         * @param {{link?: {text: string, href: string}, ms?: number}} [opts] - Optional link and duration.
          * @returns {void}
          */
-        show(message, isError = false) {
+        show(message, isError = false, opts = {}) {
             if (!this._wrap || !this._wrap.isConnected) {
                 this._wrap = el('div', { cls: CLS.notices, attrs: { role: 'status', 'aria-live': 'polite' } });
                 document.body.append(this._wrap);
             }
             const item = el('div', { cls: [CLS.notice, isError ? CLS.noticeError : ''], text: `${CONFIG.SCRIPT_NAME}: ${message}` });
+            if (opts.link) {
+                item.append(' ', el('a', { text: opts.link.text, attrs: { href: opts.link.href, target: '_blank', rel: 'noopener noreferrer' } }));
+            }
             this._wrap.append(item);
-            setTimeout(() => item.remove(), CONFIG.NOTICE_MS * (isError ? 2 : 1));
+            setTimeout(() => item.remove(), opts.ms ?? CONFIG.NOTICE_MS * (isError ? 2 : 1));
         },
     };
 
@@ -2586,6 +2673,7 @@ ${colorRules}
         if (kind === 'faction' && btn.parentElement) {
             btn.parentElement.classList.toggle(CLS.factionHost, !hidden);
             btn.parentElement.classList.toggle(CLS.factionHostNote, Boolean(note));
+            ArmoryFilter.schedule(); // a note appeared, changed or went away
         }
     }
 
@@ -3230,7 +3318,10 @@ ${colorRules}
                 existing?.remove();
                 return;
             }
-            if (existing && existing.dataset.tradeId === tradeId) return;
+            if (existing && existing.dataset.tradeId === tradeId) {
+                this._maybeCheck(root, existing); // items may have changed or finished loading
+                return;
+            }
             existing?.remove();
             const bar = cont.previousElementSibling?.matches(CONFIG.SEL.TRADE_BAR) ? cont.previousElementSibling : null;
             if (!bar) return; // layout changed: no place for the box
@@ -3245,19 +3336,21 @@ ${colorRules}
                 this._toggle(root, tradeId, input, box).catch((err) => reportError('Trade log', err));
             });
             bar.append(box);
-            this._loadState(tradeId, input, box);
+            this._loadState(root, tradeId, input, box);
         },
 
         /**
          * Show whether the trade is already logged (one request per trade per page load).
+         * @param {Element} root - Trade container.
          * @param {string} tradeId - Trade ID.
          * @param {HTMLInputElement} input - Checkbox.
          * @param {HTMLElement} box - Label.
          * @returns {void}
          */
-        _loadState(tradeId, input, box) {
+        _loadState(root, tradeId, input, box) {
             if (this._state.has(tradeId)) {
                 input.checked = this._state.get(tradeId);
+                this._maybeCheck(root, box);
                 return;
             }
             this._busy(box, input, true);
@@ -3267,7 +3360,54 @@ ${colorRules}
                     input.checked = data?.logged === true;
                 })
                 .catch((err) => handleSharedError('Trade log', err, { quiet: true }))
-                .finally(() => this._busy(box, input, false));
+                .finally(() => {
+                    this._busy(box, input, false);
+                    this._maybeCheck(root, box);
+                });
+        },
+
+        /**
+         * For a trade that is not logged, ask the server which items would be
+         * logged, and highlight the box if there are any. Asks again only when
+         * the trade's items change. Read-only: never ticks the box.
+         * @param {Element} root - Trade container.
+         * @param {HTMLElement} box - Label.
+         * @returns {void}
+         */
+        _maybeCheck(root, box) {
+            const tradeId = box.dataset.tradeId;
+            if (!this._state.has(tradeId)) return; // logged state still loading; called again when it arrives
+            const body = this._collect(root);
+            const sig = JSON.stringify(body.items);
+            if (box.dataset.checkSig === sig) return;
+            box.dataset.checkSig = sig;
+            if (!body.items.length) {
+                this._setNudge(box, []);
+                return;
+            }
+            Server.request('POST', `/trades/${tradeId}/check`, { body: { items: body.items } })
+                .then((data) => {
+                    if (box.isConnected && box.dataset.checkSig === sig) this._setNudge(box, Array.isArray(data?.items) ? data.items : []);
+                })
+                .catch((err) => handleSharedError('Trade log', err, { quiet: true }));
+        },
+
+        /**
+         * Highlight (or not) the box for the faction items found in the trade.
+         * @param {HTMLElement} box - Label.
+         * @param {{armoryId: string, itemName: string}[]} items - Items that would be logged.
+         * @returns {void}
+         */
+        _setNudge(box, items) {
+            box.dataset.nudge = String(items.length);
+            const input = box.querySelector('input');
+            const text = box.querySelector('span');
+            const n = items.length;
+            if (text) text.textContent = n ? `Log This As Traded (${n} faction item${n === 1 ? '' : 's'})` : 'Log This As Traded';
+            box.title = n
+                ? `This trade has faction items that aren't logged yet: ${items.map((i) => i.itemName || `#${i.armoryId}`).join(', ')}. Tick to log them.`
+                : 'Editors: record this trade in the faction spreadsheet';
+            box.classList.toggle(CLS.logBoxNudge, n > 0 && !input?.checked);
         },
 
         /**
@@ -3333,6 +3473,7 @@ ${colorRules}
                     this._state.set(tradeId, false);
                     Notice.show('Trade log removed for this trade.');
                 }
+                box.classList.toggle(CLS.logBoxNudge, Number(box.dataset.nudge) > 0 && !input.checked);
             } catch (err) {
                 input.checked = !want;
                 handleSharedError('Trade log', err);
@@ -3653,6 +3794,116 @@ ${colorRules}
     };
 
     /** @type {PageAdapter} */
+    /**
+     * Filter bar above the Faction Armory list (everyone). Only shows or hides
+     * rows Torn has already loaded on the current page; it never clicks or
+     * changes anything in Torn.
+     */
+    const ArmoryFilter = {
+        /** Shared by every bar (weapons and armour tabs). */
+        state: { q: '', mode: 'all' },
+        /** @type {Element|null} Armory root, for re-applying after buttons change. */
+        _root: null,
+        _schedule: null,
+
+        /**
+         * Add the bar above each armory list that has note buttons, then filter.
+         * Idempotent: runs after every scan.
+         * @param {Element} root - Armory root.
+         * @returns {void}
+         */
+        ensure(root) {
+            this._root = root;
+            root.querySelectorAll(CONFIG.SEL.FACTION_LIST).forEach((list) => {
+                if (!list.querySelector(`.${CLS.btn}[data-tms-an-kind="faction"]`)) return;
+                const title = list.previousElementSibling?.matches(CONFIG.SEL.FACTION_LIST_TITLE) ? list.previousElementSibling : null;
+                const anchor = title ?? list;
+                if (anchor.previousElementSibling?.classList.contains(CLS.filterBar)) return;
+                anchor.before(this._buildBar());
+            });
+            this.apply();
+        },
+
+        /**
+         * Build one filter bar.
+         * @returns {HTMLElement} Bar.
+         */
+        _buildBar() {
+            const q = el('input', { attrs: { type: 'search', placeholder: 'Filter this page: item, label or note…', 'aria-label': 'Filter armory items' } });
+            const mode = el('select', { attrs: { 'aria-label': 'Show' } }, [
+                el('option', { text: 'All items', attrs: { value: 'all' } }),
+                el('option', { text: 'Tagged only', attrs: { value: 'tagged' } }),
+                el('option', { text: 'Untagged bonus items', attrs: { value: 'untagged' } }),
+            ]);
+            q.value = this.state.q;
+            mode.value = this.state.mode;
+            const onChange = () => {
+                this.state = { q: q.value, mode: mode.value };
+                this.apply();
+            };
+            q.addEventListener('input', onChange);
+            mode.addEventListener('change', onChange);
+            // Keep typing away from Torn's own keyboard shortcuts.
+            q.addEventListener('keydown', (e) => e.stopPropagation());
+            return el('div', { cls: [CLS.filterBar, CLS.own] }, [q, mode, el('span')]);
+        },
+
+        /**
+         * Whether a row passes the filter (pure apart from reading the row).
+         * @param {Element} row - Armory row.
+         * @param {Element} btn - Its faction note button.
+         * @returns {boolean} True to show.
+         */
+        _matches(row, btn) {
+            const note = sourceOf(btn).get(btn.dataset[DATA_ID]);
+            if (this.state.mode === 'tagged' && !note) return false;
+            if (this.state.mode === 'untagged' && (note || !row.dataset[DATA_BONUS])) return false;
+            const q = this.state.q.trim().toLowerCase();
+            if (!q) return true;
+            return [btn.dataset[DATA_NAME], note?.label, note?.text, row.dataset[DATA_BONUS]]
+                .some((v) => String(v ?? '').toLowerCase().includes(q));
+        },
+
+        /**
+         * Show/hide rows and update each bar's count.
+         * @returns {void}
+         */
+        apply() {
+            const root = this._root;
+            if (!root?.isConnected) return;
+            const active = this.state.mode !== 'all' || this.state.q.trim() !== '';
+            root.querySelectorAll(CONFIG.SEL.FACTION_LIST).forEach((list) => {
+                let shown = 0;
+                let total = 0;
+                list.querySelectorAll(':scope > li').forEach((row) => {
+                    const btn = row.querySelector(`.${CLS.btn}[data-tms-an-kind="faction"]`);
+                    if (!btn) return;
+                    total += 1;
+                    const show = !active || this._matches(row, btn);
+                    if (show) shown += 1;
+                    row.classList.toggle(CLS.rowHidden, !show);
+                });
+                const title = list.previousElementSibling?.matches(CONFIG.SEL.FACTION_LIST_TITLE) ? list.previousElementSibling : list;
+                const bar = title.previousElementSibling?.classList.contains(CLS.filterBar) ? title.previousElementSibling : null;
+                if (!bar) return;
+                const [q, mode, count] = bar.children;
+                if (q.value !== this.state.q) q.value = this.state.q;
+                if (mode.value !== this.state.mode) mode.value = this.state.mode;
+                count.textContent = active ? `Showing ${shown} of ${total} on this page` : '';
+            });
+        },
+
+        /**
+         * Re-apply soon (after note buttons were re-rendered).
+         * @returns {void}
+         */
+        schedule() {
+            if (!this._root) return;
+            if (!this._schedule) this._schedule = debounce(() => this.apply(), CONFIG.FILTER_DEBOUNCE_MS);
+            this._schedule();
+        },
+    };
+
     const FACTION_ADAPTER = {
         name: 'faction',
         rowSelector: CONFIG.SEL.FACTION_ROW,
@@ -3663,6 +3914,7 @@ ${colorRules}
         getStats: (row) => statsFromIcons(row.querySelector(CONFIG.SEL.FACTION_STATS)),
         backfill: true,
         trackItems: true,
+        afterScan: (root) => ArmoryFilter.ensure(root),
         mounts: [
             {
                 kind: 'faction',
