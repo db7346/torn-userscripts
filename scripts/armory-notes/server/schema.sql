@@ -76,8 +76,19 @@ CREATE TABLE IF NOT EXISTS trade_log (
 CREATE INDEX IF NOT EXISTS idx_trade_log_item ON trade_log (armory_id, logged_at);
 CREATE INDEX IF NOT EXISTS idx_trade_log_at ON trade_log (logged_at);
 
--- Armory sync bookkeeping (last_run, last_ok, last_error, last_error_at, summary).
+-- Armory sync bookkeeping (last_run, last_ok, last_error, last_error_at, summary,
+-- sync_wanted, members_json, members_at, editors_seeded).
 CREATE TABLE IF NOT EXISTS sync_state (
     k TEXT PRIMARY KEY,
     v TEXT NOT NULL DEFAULT ''
+);
+
+-- Editors, managed by the admin (ADMIN_ID) from the script. The admin is
+-- always an editor and is not stored here.
+CREATE TABLE IF NOT EXISTS editors (
+    player_id     INTEGER PRIMARY KEY,
+    player_name   TEXT NOT NULL DEFAULT '',
+    added_by_id   INTEGER NOT NULL DEFAULT 0,
+    added_by_name TEXT NOT NULL DEFAULT '',
+    added_at      INTEGER NOT NULL DEFAULT 0
 );

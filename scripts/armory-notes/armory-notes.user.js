@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Armory Notes
 // @namespace    dadgum.torn.armorynotes
-// @version      2.6.2
+// @version      2.7.0
 // @description  Colored labels and notes on individual weapons and armor (keyed by armory ID). Private notes on the Items page; shared faction notes in the Faction Armory.
 // @author       DadGum
 // @license      MIT
@@ -48,6 +48,11 @@
  * Author: DadGum
  *
  * Changelog
+ *   2.7.0 (2026-11-02) "Manage editors (admin)" menu item: the notes admin
+ *                      (ADMIN_ID on the server) adds and removes editors from
+ *                      a faction member list, effective immediately. Editors
+ *                      on the Faction Armory get a warning when the armory
+ *                      sync failed or is over 12 hours old.
  *   2.6.2 (2026-11-02) Menu item "Clear faction notes cache" renamed to
  *                      "Reload faction notes (fix stale data)" so it doesn't
  *                      look destructive. Same behavior: nothing is deleted.
@@ -108,14 +113,17 @@
  *       On your faction's notes server (Cloudflare D1): faction notes and,
  *       for each change, the editor's Torn player ID and name; the faction
  *       armory's bonus weapons/armor (stats, bonuses, who they are loaned
- *       to) and trades logged by editors. Your API key is NOT stored on the
- *       server.
+ *       to), trades logged by editors, and the editor list (player ID,
+ *       name, who added them). Your API key is NOT stored on the server.
  *     Exception, notes admin only: the admin may store ONE Limited key of
  *       their own as a server secret (ARMORY_API_KEY). The server uses it
- *       every 6 hours to read the faction armory (faction/inventory, Limited,
- *       needs faction API access) and item stats (torn/itemdetails), about
- *       15 calls per sync, tagged comment=ArmoryNotes. Members' keys are
- *       never stored.
+ *       every 6 hours, and about 15 minutes after an editor logs a trade, to
+ *       read the faction armory (faction/inventory, Limited, needs faction
+ *       API access) and item stats (torn/itemdetails, only for items it has
+ *       not seen before): usually 2-4 calls per sync. It also reads the
+ *       faction member list (faction/members, Public) when the admin opens
+ *       "Manage editors", at most once per 12 hours unless reloaded. All
+ *       calls are tagged comment=ArmoryNotes. Members' keys are never stored.
  *   - Data sharing: faction notes are visible to members of your faction who
  *     use this script. Nothing is shared with anyone else.
  *   - Purpose of use: annotating your own and your faction's items.
@@ -202,6 +210,8 @@
 
         /** Faction Armory refresh interval while the tab is visible. */
         SHARED_POLL_MS: 45000,
+        /** Warn editors when the last successful armory sync is older than this (it runs every 6 hours). */
+        SYNC_STALE_MS: 12 * 60 * 60 * 1000,
         /** Items page: refresh the faction-note cache if older than this. */
         ITEMS_SHARED_MAX_AGE_MS: 60 * 1000,
         /** Sign in again this long before the session token expires. */
@@ -368,6 +378,8 @@
         logHost: `${PREFIX}-loghost`,
         logGroup: `${PREFIX}-loggroup`,
         logItem: `${PREFIX}-logitem`,
+        addRow: `${PREFIX}-addrow`,
+        dim: `${PREFIX}-dim`,
         label: `${PREFIX}-label`,
         icon: `${PREFIX}-icon`,
         thumbHost: `${PREFIX}-thost`,
@@ -482,6 +494,7 @@
      * @property {{id: number, name: string}} player
      * @property {{id: number, name: string}} faction
      * @property {boolean} canEdit
+     * @property {boolean} isAdmin                   - The notes admin (manages editors).
      * @property {string} serverUrl                  - Server this token belongs to.
      */
 
@@ -1372,6 +1385,8 @@
                 if (!data || !Array.isArray(data.notes)) throw new ServerError('bad_response', 'Unexpected response from the notes server.');
                 changed.push(...this.apply(data.notes));
                 if (typeof data.canEdit === 'boolean') Session.setCanEdit(data.canEdit);
+                if (typeof data.isAdmin === 'boolean') Session.setIsAdmin(data.isAdmin);
+                if (data.sync && typeof data.sync === 'object') SyncHealth.update(data.sync);
                 if (!data.hasMore) break;
             }
             this._fetchedAt = Date.now();
@@ -1738,6 +1753,57 @@
         },
     };
 
+    /**
+     * Armory sync health, as sent to editors with GET /notes.
+     * @typedef {Object} SyncHealthInfo
+     * @property {boolean} configured     - ARMORY_API_KEY is set on the server.
+     * @property {(number|null)} lastOk   - Last successful sync (epoch ms).
+     * @property {string} lastError       - Last failure message ('' if none).
+     * @property {(number|null)} lastErrorAt - Last failure time (epoch ms).
+     */
+
+    /**
+     * Warns editors on the Faction Armory, once per page load, when the armory
+     * sync is broken or stale. Uses data that comes with the notes, so it adds
+     * no requests.
+     */
+    const SyncHealth = {
+        _warned: false,
+
+        /**
+         * Problem with the sync, if any (pure).
+         * @param {SyncHealthInfo} h - Health from the server.
+         * @param {number} now - Epoch ms.
+         * @returns {string} Readable problem, or '' when healthy (or not set up).
+         */
+        problem(h, now) {
+            if (!h?.configured) return '';
+            const lastOk = Number(h.lastOk) || 0;
+            const lastErrorAt = Number(h.lastErrorAt) || 0;
+            if (lastErrorAt > lastOk && h.lastError) {
+                return `Armory sync failed (${h.lastError}). Check that the sync key still exists in Torn and that its owner has faction API access.`;
+            }
+            if (!lastOk) return 'The armory sync has not run yet. Use "Sync armory now (editors)" in the Tampermonkey menu.';
+            if (now - lastOk > CONFIG.SYNC_STALE_MS) {
+                return `The armory sync last worked ${Data.relativeTime(lastOk, now)} (it should run every 6 hours). Try "Sync armory now (editors)".`;
+            }
+            return '';
+        },
+
+        /**
+         * Show a warning once per page load, on the Faction Armory only.
+         * @param {SyncHealthInfo} h - Health from the server.
+         * @returns {void}
+         */
+        update(h) {
+            if (this._warned || !PageState.factionArmoryOpen) return;
+            const msg = this.problem(h, Date.now());
+            if (!msg) return;
+            this._warned = true;
+            Notice.show(msg, true);
+        },
+    };
+
     const Session = {
         /** @type {Session|null} */
         _mem: null,
@@ -1883,6 +1949,7 @@
                 player: { id: Number(data.player?.id) || 0, name: String(data.player?.name ?? '') },
                 faction: { id: Number(data.faction?.id) || 0, name: String(data.faction?.name ?? '') },
                 canEdit: data.canEdit === true,
+                isAdmin: data.isAdmin === true,
                 serverUrl: settings.serverUrl,
             };
             this.clearFailure();
@@ -1922,6 +1989,18 @@
             const s = this.peek();
             if (!s || s.canEdit === canEdit) return;
             s.canEdit = canEdit;
+            Storage.write(CONFIG.SESSION_KEY, s);
+        },
+
+        /**
+         * Update the admin flag (the server re-checks it on every admin request).
+         * @param {boolean} isAdmin - New value.
+         * @returns {void}
+         */
+        setIsAdmin(isAdmin) {
+            const s = this.peek();
+            if (!s || s.isAdmin === isAdmin) return;
+            s.isAdmin = isAdmin;
             Storage.write(CONFIG.SESSION_KEY, s);
         },
 
@@ -2070,6 +2149,11 @@ ${colorRules}
 .${CLS.modal} input[type="file"]{display:block;margin:8px 0;color:#e6e6e6;max-width:100%;}
 .${CLS.modal} input[type="text"],.${CLS.modal} input[type="password"]{width:100%;box-sizing:border-box;background:#14171b;
   color:#e6e6e6;border:1px solid #3a3f47;border-radius:4px;padding:4px 6px;font:12px Arial,Helvetica,sans-serif;}
+.${CLS.modal} select,.${CLS.modal} input[type="number"]{box-sizing:border-box;background:#14171b;color:#e6e6e6;
+  border:1px solid #3a3f47;border-radius:4px;padding:4px 6px;font:12px Arial,Helvetica,sans-serif;min-width:0;}
+.${CLS.addRow}{display:flex;gap:6px;align-items:center;margin:4px 0;}
+.${CLS.addRow} select,.${CLS.addRow} input{flex:1 1 auto;}
+.${CLS.dim}{color:#9aa0a6;font-size:11px;}
 .${CLS.popMeta}{color:#9aa0a6;font-size:11px;margin:-4px 0 8px;}
 .${CLS.status}{margin:4px 0 10px;color:#c9d1d9;white-space:pre-wrap;}
 .${CLS.checklist}{max-height:240px;overflow:auto;border:1px solid #3a3f47;border-radius:4px;padding:4px;margin:6px 0 10px;}
@@ -2874,7 +2958,7 @@ ${colorRules}
         if (Session.isBlocked()) return `Faction notes are off: ${Session.failureMessage()}\nThe Faction Armory shows your private notes.`;
         const s = Session.peek();
         if (!s) return 'Not signed in yet.';
-        const role = s.canEdit ? 'editor (can change faction notes)' : 'viewer (read-only)';
+        const role = s.isAdmin ? 'admin (manages editors)' : s.canEdit ? 'editor (can change faction notes)' : 'viewer (read-only)';
         const faction = s.faction.name ? ` · ${s.faction.name}` : '';
         return `Signed in as ${s.player.name} [${s.player.id}]${faction}\nRole: ${role}`;
     }
@@ -3363,6 +3447,147 @@ ${colorRules}
                 : 'No trades have been logged yet.',
             content: entries.length ? [list] : [],
             actions: [{ label: 'Close', variant: 'primary', onClick: () => Modal.close() }],
+        });
+    }
+
+    /**
+     * One editor as returned by GET /admin/editors.
+     * @typedef {Object} EditorEntry
+     * @property {number} id
+     * @property {string} name
+     * @property {string} position
+     * @property {(boolean|null)} inFaction - null when the member list is unavailable.
+     * @property {string} addedBy
+     * @property {(number|null)} addedAt
+     */
+
+    /**
+     * Text for one editor row (pure).
+     * @param {EditorEntry} e - Editor.
+     * @returns {string} e.g. "Oman [123] · Officer · added by DadGum".
+     */
+    function editorRowText(e) {
+        const parts = [`${e.name || 'Unknown'} [${e.id}]`];
+        if (e.inFaction === false) parts.push('no longer in the faction');
+        else if (e.position) parts.push(e.position);
+        if (e.addedBy) parts.push(`added by ${e.addedBy}`);
+        return parts.join(' · ');
+    }
+
+    /**
+     * Tampermonkey menu: the notes admin adds and removes editors. The server
+     * checks that the caller is ADMIN_ID; changes apply on the editor's next
+     * request (their buttons update on the next refresh).
+     * @returns {Promise<void>}
+     */
+    async function openEditorsDialog() {
+        if (!Shared.isActive()) {
+            openSettingsDialog('Set up faction sharing first.');
+            return;
+        }
+        // Known non-admin (the flag comes with every notes refresh): answer locally.
+        // Unknown (older session) falls through; the server decides either way.
+        if (Session.peek()?.isAdmin === false) {
+            Notice.show('Only the notes admin can manage editors.');
+            return;
+        }
+        /** @param {boolean} refresh - Reload the member list from Torn. */
+        const load = (refresh) => Server.request('GET', `/admin/editors${refresh ? '?refresh=1' : ''}`);
+        let data;
+        try {
+            data = await load(false);
+        } catch (err) {
+            handleSharedError('Manage editors', err);
+            return;
+        }
+        Session.setIsAdmin(true);
+
+        const list = el('div', { cls: CLS.checklist });
+        const addRow = el('div', { cls: CLS.addRow });
+        const info = el('div', { cls: CLS.dim });
+
+        /** Re-render everything from `data`. */
+        const render = () => {
+            const editors = Array.isArray(data?.editors) ? data.editors : [];
+            const members = Array.isArray(data?.members) ? data.members : [];
+            list.replaceChildren(
+                el('div', { cls: CLS.logItem }, [el('span', { text: `${data?.admin?.name || 'You'} [${data?.admin?.id ?? ''}] · admin, always an editor` })]),
+                ...editors.map((e) => {
+                    const remove = el('button', { cls: [CLS.uiBtn, CLS.uiDanger], text: 'Remove', attrs: { type: 'button' } });
+                    remove.addEventListener('click', () => mutate(remove, 'DELETE', e.id, `Removed ${e.name || e.id} as an editor.`));
+                    return el('div', { cls: CLS.logItem }, [el('span', { text: editorRowText(e) }), remove]);
+                }),
+            );
+            if (!editors.length) list.append(el('div', { cls: [CLS.logItem, CLS.dim], text: 'No other editors yet.' }));
+
+            const taken = new Set([...editors.map((e) => e.id), Number(data?.admin?.id)]);
+            const candidates = members.filter((m) => !taken.has(m.id));
+            const addBtn = el('button', { cls: [CLS.uiBtn, CLS.uiPrimary], text: 'Add editor', attrs: { type: 'button' } });
+            let picker;
+            if (members.length) {
+                picker = el('select', { attrs: { 'aria-label': 'Faction member' } }, [
+                    el('option', { text: candidates.length ? 'Choose a faction member…' : 'Everyone is already an editor', attrs: { value: '' } }),
+                    ...candidates.map((m) => el('option', { text: `${m.name} [${m.id}]${m.position ? ` · ${m.position}` : ''}`, attrs: { value: String(m.id) } })),
+                ]);
+            } else {
+                picker = el('input', { attrs: { type: 'number', min: '1', placeholder: 'Player ID', 'aria-label': 'Player ID' } });
+            }
+            addBtn.addEventListener('click', () => {
+                const pid = String(picker.value ?? '').trim();
+                if (!/^\d{1,10}$/.test(pid)) {
+                    Notice.show(members.length ? 'Choose a faction member first.' : 'Enter a player ID first.', true);
+                    return;
+                }
+                const name = members.find((m) => String(m.id) === pid)?.name ?? pid;
+                mutate(addBtn, 'PUT', pid, `${name} is now an editor.`);
+            });
+            addRow.replaceChildren(picker, addBtn);
+
+            const when = data?.membersFetchedAt ? `Member list from ${Data.relativeTime(data.membersFetchedAt, Date.now())}.` : '';
+            info.replaceChildren(document.createTextNode([data?.membersError, when].filter(Boolean).join(' ')));
+        };
+
+        /**
+         * Add or remove one editor, then re-render from the server's answer.
+         * @param {HTMLButtonElement} btn - Button to disable while working.
+         * @param {'PUT'|'DELETE'} method - Add or remove.
+         * @param {(number|string)} pid - Player ID.
+         * @param {string} done - Notice on success.
+         * @returns {Promise<void>}
+         */
+        const mutate = async (btn, method, pid, done) => {
+            btn.disabled = true;
+            try {
+                const res = await Server.request(method, `/admin/editors/${encodeURIComponent(String(pid))}`);
+                data = { ...data, editors: Array.isArray(res?.editors) ? res.editors : data.editors };
+                render();
+                Notice.show(done);
+            } catch (err) {
+                btn.disabled = false;
+                handleSharedError('Manage editors', err);
+            }
+        };
+
+        render();
+        Modal.open({
+            title: 'Manage editors',
+            message: 'Editors can add and change faction notes, log trades and sync the armory. Changes apply right away; '
+                + 'a removed editor can no longer save anything, and their buttons update on their next refresh.',
+            content: [list, addRow, info],
+            actions: [
+                {
+                    label: 'Reload member list',
+                    onClick: async () => {
+                        try {
+                            data = await load(true);
+                            render();
+                        } catch (err) {
+                            handleSharedError('Manage editors', err);
+                        }
+                    },
+                },
+                { label: 'Close', variant: 'primary', onClick: () => Modal.close() },
+            ],
         });
     }
 
@@ -3967,6 +4192,9 @@ ${colorRules}
         }));
         GM_registerMenuCommand('Sync armory now (editors)', guard('Armory sync', () => {
             syncArmoryNow().catch((err) => reportError('Armory sync', err));
+        }));
+        GM_registerMenuCommand('Manage editors (admin)', guard('Manage editors', () => {
+            openEditorsDialog().catch((err) => reportError('Manage editors', err));
         }));
         GM_registerMenuCommand('Reload faction notes (fix stale data)', guard('Reload faction notes', () => {
             SharedStore.clear();

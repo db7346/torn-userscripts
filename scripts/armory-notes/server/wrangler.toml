@@ -3,7 +3,8 @@
 #
 # Set these in the Cloudflare dashboard (Worker > Settings > Variables & Secrets):
 #   FACTION_ID    (Text)    your faction ID, e.g. 12345
-#   EDITOR_IDS    (Text)    comma-separated player IDs allowed to edit, e.g. 1234567,2345678
+#   ADMIN_ID      (Text)    the notes admin's player ID (manages editors from the script)
+#   EDITOR_IDS    (Text)    optional, legacy: copied once into the editors table
 #   TOKEN_SECRET  (Secret)  a long random string used to sign session tokens
 
 # Must match the Worker name you create in the dashboard.
@@ -11,7 +12,7 @@ name = "torn-armory-notes"
 main = "worker.js"
 compatibility_date = "2026-10-01"
 
-# Keep FACTION_ID / EDITOR_IDS set in the dashboard when GitHub pushes redeploy.
+# Keep FACTION_ID / ADMIN_ID set in the dashboard when GitHub pushes redeploy.
 keep_vars = true
 
 # No preview URLs: only the production Worker can touch the database.
@@ -26,6 +27,8 @@ database_id = "300e25e1-d15c-4f5d-afe3-79ea37d76985"
 [observability]
 enabled = true
 
-# Armory sync every 6 hours (only runs when the ARMORY_API_KEY secret is set).
+# Armory sync every 6 hours, plus a 15-minute check that re-syncs only after
+# an editor logged or removed a trade (only when the ARMORY_API_KEY secret is set).
+# The second entry must match CONFIG.QUICK_SYNC_CRON in worker.js.
 [triggers]
-crons = ["23 */6 * * *"]
+crons = ["23 */6 * * *", "*/15 * * * *"]

@@ -4,8 +4,9 @@ import { viewHtml } from './view.mjs';
  * Torn Armory Notes - shared faction notes server (Cloudflare Worker + D1).
  *
  * Endpoints (JSON in, JSON out):
- *   POST   /auth                 { key }  -> { token, expiresAt, player, faction, canEdit }
- *   GET    /notes?since=<ms>     faction members: notes changed at/after <ms> (0 = all live notes)
+ *   POST   /auth                 { key }  -> { token, expiresAt, player, faction, canEdit, isAdmin }
+ *   GET    /notes?since=<ms>     faction members: notes changed at/after <ms> (0 = all live notes);
+ *                                editors also get { sync } (armory sync health)
  *   PUT    /notes/:armoryId      editors: create/update one note
  *   DELETE /notes/:armoryId      editors: delete one note
  *   POST   /notes/import         editors: bulk upload { notes: [...] } (never overwrites)
@@ -21,6 +22,9 @@ import { viewHtml } from './view.mjs';
  *                                (replaces earlier log; fingerprints are matched here)
  *   DELETE /trades/:tradeId[/:armoryId]  editors: remove a trade's log (or one item)
  *   POST   /armory/sync          editors: run the armory sync now (5-minute cooldown)
+ *   GET    /admin/editors        admin: editor list + faction member list (?refresh=1 reloads members)
+ *   PUT    /admin/editors/:pid   admin: make a faction member an editor
+ *   DELETE /admin/editors/:pid   admin: remove an editor
  *   GET    /view?key=            read-only web page of the same list (needs the VIEW_TOKEN
  *                                secret; off when it is not set)
  *   GET    /export.csv?token=    bonus items + notes as CSV for a spreadsheet (needs the
@@ -32,12 +36,16 @@ import { viewHtml } from './view.mjs';
  * Identity: the member's PUBLIC Torn API key is sent to POST /auth only. The
  * Worker calls GET https://api.torn.com/v2/user?selections=basic,faction once,
  * checks faction.id === FACTION_ID, and returns an HMAC-signed token (12 h).
- * The key is never stored or logged. Editor rights are checked against
- * EDITOR_IDS on every write, so removing an editor takes effect immediately.
+ * The key is never stored or logged. Editor rights are checked against the
+ * `editors` table (managed by the admin from the script) on every write, so
+ * removing an editor takes effect immediately. The admin is ADMIN_ID: the
+ * player ID comes from Torn at sign-in, inside a token signed with
+ * TOKEN_SECRET, so nobody can claim it without that player's API key.
  *
  * Environment (Cloudflare dashboard > Settings > Variables & Secrets):
  *   FACTION_ID   (text)    faction allowed to use this server
- *   EDITOR_IDS   (text)    comma-separated player IDs allowed to edit
+ *   ADMIN_ID     (text)    the notes admin's player ID: always an editor, manages editors
+ *   EDITOR_IDS   (text)    optional, legacy: copied once into the `editors` table, then unused
  *   TOKEN_SECRET (secret)  random string for signing tokens
  *   EXPORT_TOKEN (secret)  optional: enables /export.csv for anyone with the link
  *   VIEW_TOKEN   (secret)  optional: enables /view for anyone with the link
@@ -45,6 +53,10 @@ import { viewHtml } from './view.mjs';
  *                          (needs faction API access). Every 6 hours (cron) the
  *                          Worker reads the whole faction armory with it:
  *                          faction/inventory (Limited) + torn/itemdetails (Public).
+ *                          Also used for faction/members (Public) when the admin
+ *                          opens "Manage editors" (cached 12 hours).
+ *                          A second cron (every 15 minutes) re-syncs only after
+ *                          an editor logged or removed a trade.
  *   DB           (D1 binding, see wrangler.toml)
  */
 
@@ -83,6 +95,11 @@ const CONFIG = Object.freeze({
     /** New items whose stats are looked up per sync (stats never change, so known items are skipped). */
     SYNC_DETAILS_MAX_CALLS: 35,
     SYNC_COOLDOWN_MS: 5 * 60 * 1000,
+    /** Cron that re-syncs only when a trade was logged since the last sync (must match wrangler.toml). */
+    QUICK_SYNC_CRON: '*/15 * * * *',
+    /** Faction member list (for "Manage editors") is cached this long. */
+    MEMBERS_TTL_MS: 12 * 60 * 60 * 1000,
+    MAX_EDITORS: 200,
     /** A trade logged up to this long before an item disappeared counts as the reason it left. */
     TRADE_GRACE_MS: 7 * 24 * 60 * 60 * 1000,
     /** Without the sync: an item counts as missing once other items of its type were seen this much later. */
@@ -172,7 +189,8 @@ async function readJson(request) {
 /**
  * Read and validate the Worker's environment.
  * @param {Object} env - Worker env.
- * @returns {{factionId: number, editors: Set<number>, secret: string, db: any}} Parsed settings.
+ * @returns {{factionId: number, adminId: number, legacyEditors: number[], secret: string, db: any,
+ *            editorSet: (Promise<Set<number>>|null)}} Parsed settings.
  * @throws {HttpError} 500 if misconfigured.
  */
 function settings(env) {
@@ -184,13 +202,20 @@ function settings(env) {
         throw new HttpError(500, 'server_config', 'Server is missing TOKEN_SECRET (16+ characters).');
     }
     if (!env.DB) throw new HttpError(500, 'server_config', 'Server is missing the DB (D1) binding.');
-    const editors = new Set(
-        String(env.EDITOR_IDS ?? '')
-            .split(',')
-            .map((s) => Number(s.trim()))
-            .filter((n) => Number.isInteger(n) && n > 0),
-    );
-    return { factionId, editors, secret: String(env.TOKEN_SECRET), db: env.DB };
+    const legacyEditors = String(env.EDITOR_IDS ?? '')
+        .split(',')
+        .map((s) => Number(s.trim()))
+        .filter((n) => Number.isInteger(n) && n > 0);
+    const adminId = Number(String(env.ADMIN_ID ?? '').trim());
+    return {
+        factionId,
+        adminId: Number.isInteger(adminId) && adminId > 0 ? adminId : 0,
+        legacyEditors,
+        secret: String(env.TOKEN_SECRET),
+        db: env.DB,
+        /** @type {Promise<Set<number>>|null} Editor IDs, loaded once per request. */
+        editorSet: null,
+    };
 }
 
 /* ===========================================================================
@@ -276,14 +301,76 @@ async function requireUser(request, cfg) {
 }
 
 /**
- * Require editor rights (checked live against EDITOR_IDS).
+ * Editor IDs from the `editors` table, loaded once per request. The first time,
+ * the legacy EDITOR_IDS variable is copied into the table (marked in sync_state
+ * so it never happens again, even if every editor is later removed). If the
+ * table does not exist yet (migration 0006 not run), EDITOR_IDS is used as is.
+ * @param {ReturnType<typeof settings>} cfg - Settings.
+ * @returns {Promise<Set<number>>} Editor player IDs (not including the admin).
+ */
+function loadEditors(cfg) {
+    if (!cfg.editorSet) {
+        cfg.editorSet = (async () => {
+            let rows;
+            try {
+                // One query: the editors, plus a -1 marker once the legacy list was copied.
+                ({ results: rows } = await cfg.db.prepare(
+                    "SELECT player_id AS id FROM editors UNION ALL SELECT -1 AS id FROM sync_state WHERE k = 'editors_seeded'",
+                ).all());
+            } catch (err) {
+                if (/no such table/i.test(String(err?.message ?? err))) return new Set(cfg.legacyEditors);
+                throw err;
+            }
+            const ids = new Set((rows ?? []).map((r) => Number(r.id)));
+            if (!ids.has(-1)) {
+                const now = Date.now();
+                await cfg.db.batch([
+                    cfg.db.prepare(
+                        `INSERT OR IGNORE INTO editors (player_id, player_name, added_by_id, added_by_name, added_at)
+                         SELECT value, '', 0, 'old editor list', ?2 FROM json_each(?1)`,
+                    ).bind(JSON.stringify(cfg.legacyEditors), now),
+                    cfg.db.prepare("INSERT OR REPLACE INTO sync_state (k, v) VALUES ('editors_seeded', ?1)").bind(String(now)),
+                ]);
+                cfg.legacyEditors.forEach((id) => ids.add(id));
+            }
+            ids.delete(-1);
+            return ids;
+        })();
+    }
+    return cfg.editorSet;
+}
+
+/**
+ * Whether a player may edit (the admin always can).
+ * @param {number} pid - Player ID.
+ * @param {ReturnType<typeof settings>} cfg - Settings.
+ * @returns {Promise<boolean>} True for editors.
+ */
+async function isEditor(pid, cfg) {
+    return (cfg.adminId !== 0 && pid === cfg.adminId) || (await loadEditors(cfg)).has(pid);
+}
+
+/**
+ * Require editor rights (checked live on every request).
  * @param {{pid: number}} user - Claims.
- * @param {{editors: Set<number>}} cfg - Settings.
- * @returns {void}
+ * @param {ReturnType<typeof settings>} cfg - Settings.
+ * @returns {Promise<void>}
  * @throws {HttpError} 403 if not an editor.
  */
-function requireEditor(user, cfg) {
-    if (!cfg.editors.has(user.pid)) throw new HttpError(403, 'not_editor', 'You are not allowed to edit faction notes.');
+async function requireEditor(user, cfg) {
+    if (!(await isEditor(user.pid, cfg))) throw new HttpError(403, 'not_editor', 'You are not allowed to edit faction notes.');
+}
+
+/**
+ * Require the notes admin (ADMIN_ID).
+ * @param {{pid: number}} user - Claims.
+ * @param {ReturnType<typeof settings>} cfg - Settings.
+ * @returns {void}
+ * @throws {HttpError} 403 if ADMIN_ID is not set or this is someone else.
+ */
+function requireAdmin(user, cfg) {
+    if (!cfg.adminId) throw new HttpError(403, 'admin_off', 'No admin is set on the server (ADMIN_ID variable).');
+    if (user.pid !== cfg.adminId) throw new HttpError(403, 'not_admin', 'Only the notes admin can manage editors.');
 }
 
 /* ===========================================================================
@@ -409,7 +496,8 @@ async function handleAuth(request, cfg) {
         expiresAt: exp,
         player: { id: pid, name },
         faction: { id: fid, name: String(data.faction?.name ?? '') },
-        canEdit: cfg.editors.has(pid),
+        canEdit: await isEditor(pid, cfg),
+        isAdmin: cfg.adminId !== 0 && pid === cfg.adminId,
     });
 }
 
@@ -417,11 +505,13 @@ async function handleAuth(request, cfg) {
  * GET /notes?since=<ms> - changed notes (including tombstones).
  * @param {Request} request - Request.
  * @param {URL} url - Parsed URL.
+ * @param {Object} env - Worker env (for the sync key check).
  * @param {ReturnType<typeof settings>} cfg - Settings.
  * @returns {Promise<Response>} Response.
  */
-async function handleList(request, url, cfg) {
+async function handleList(request, url, env, cfg) {
     const user = await requireUser(request, cfg);
+    const canEdit = await isEditor(user.pid, cfg);
     const since = Math.max(0, Number(url.searchParams.get('since')) || 0);
     // A full load (since=0) skips tombstones; incremental loads include them.
     const sql = since === 0
@@ -430,9 +520,12 @@ async function handleList(request, url, cfg) {
     const { results } = await cfg.db.prepare(sql).bind(since, CONFIG.MAX_RESULTS).all();
     return json(request, 200, {
         serverTime: Date.now(),
-        canEdit: cfg.editors.has(user.pid),
+        canEdit,
+        isAdmin: cfg.adminId !== 0 && user.pid === cfg.adminId,
         notes: (results ?? []).map(rowToNote),
         hasMore: (results ?? []).length >= CONFIG.MAX_RESULTS,
+        // Editors get the armory sync health, so their script can warn when it breaks.
+        ...(canEdit ? { sync: await syncHealth(env, cfg) } : {}),
     });
 }
 
@@ -486,7 +579,7 @@ function logStmt(db, id, action, n, user, now) {
  */
 async function handlePut(request, rawId, cfg) {
     const user = await requireUser(request, cfg);
-    requireEditor(user, cfg);
+    await requireEditor(user, cfg);
     const id = armoryId(rawId);
     const note = cleanNote(await readJson(request));
     const now = Date.now();
@@ -504,7 +597,7 @@ async function handlePut(request, rawId, cfg) {
  */
 async function handleDelete(request, rawId, cfg) {
     const user = await requireUser(request, cfg);
-    requireEditor(user, cfg);
+    await requireEditor(user, cfg);
     const id = armoryId(rawId);
     const now = Date.now();
     await cfg.db.batch([
@@ -527,7 +620,7 @@ async function handleDelete(request, rawId, cfg) {
  */
 async function handleImport(request, cfg) {
     const user = await requireUser(request, cfg);
-    requireEditor(user, cfg);
+    await requireEditor(user, cfg);
     const body = await readJson(request);
     const list = Array.isArray(body?.notes) ? body.notes : null;
     if (!list) throw new HttpError(400, 'bad_import', 'Expected { notes: [...] }.');
@@ -582,7 +675,7 @@ async function handleImport(request, cfg) {
  */
 async function handleFingerprints(request, cfg) {
     const user = await requireUser(request, cfg);
-    requireEditor(user, cfg);
+    await requireEditor(user, cfg);
     const body = await readJson(request);
     const list = Array.isArray(body?.items) ? body.items : null;
     if (!list) throw new HttpError(400, 'bad_fingerprints', 'Expected { items: [...] }.');
@@ -637,7 +730,7 @@ async function handleFingerprints(request, cfg) {
  */
 async function handleItemsSeen(request, cfg) {
     const user = await requireUser(request, cfg);
-    requireEditor(user, cfg);
+    await requireEditor(user, cfg);
     const body = await readJson(request);
     const list = Array.isArray(body?.items) ? body.items : null;
     if (!list) throw new HttpError(400, 'bad_items', 'Expected { items: [...] }.');
@@ -756,7 +849,7 @@ function tradeRow(r) {
  */
 async function handleTradeGet(request, rawId, cfg) {
     const user = await requireUser(request, cfg);
-    requireEditor(user, cfg);
+    await requireEditor(user, cfg);
     const id = tradeId(rawId);
     const { results } = await cfg.db.prepare('SELECT * FROM trade_log WHERE trade_id = ?1 ORDER BY id').bind(id).all();
     return json(request, 200, { logged: (results ?? []).length > 0, items: (results ?? []).map(tradeRow) });
@@ -771,7 +864,7 @@ async function handleTradeGet(request, rawId, cfg) {
  */
 async function handleTradeList(request, url, cfg) {
     const user = await requireUser(request, cfg);
-    requireEditor(user, cfg);
+    await requireEditor(user, cfg);
     const limit = Math.min(CONFIG.TRADE_LIST_MAX, Math.max(1, Number(url.searchParams.get('limit')) || 100));
     const { results } = await cfg.db.prepare('SELECT * FROM trade_log ORDER BY logged_at DESC, id DESC LIMIT ?1').bind(limit).all();
     return json(request, 200, { items: (results ?? []).map(tradeRow) });
@@ -787,7 +880,7 @@ async function handleTradeList(request, url, cfg) {
  */
 async function handleTradeLog(request, rawId, cfg) {
     const user = await requireUser(request, cfg);
-    requireEditor(user, cfg);
+    await requireEditor(user, cfg);
     const id = tradeId(rawId);
     const body = await readJson(request);
     const from = String(body?.from ?? '');
@@ -825,6 +918,7 @@ async function handleTradeLog(request, rawId, cfg) {
         return json(request, 200, { logged: [], skipped: [...wanted.keys()] }); // nothing eligible: leave any earlier log alone
     }
     await cfg.db.batch(stmts);
+    await markSyncWanted(cfg);
     return json(request, 200, { logged, skipped: [...wanted.keys()].filter((aid) => !eligible.has(aid)) });
 }
 
@@ -838,12 +932,13 @@ async function handleTradeLog(request, rawId, cfg) {
  */
 async function handleTradeDelete(request, rawId, rawArmoryId, cfg) {
     const user = await requireUser(request, cfg);
-    requireEditor(user, cfg);
+    await requireEditor(user, cfg);
     const id = tradeId(rawId);
     const stmt = rawArmoryId === undefined
         ? cfg.db.prepare('DELETE FROM trade_log WHERE trade_id = ?1').bind(id)
         : cfg.db.prepare('DELETE FROM trade_log WHERE trade_id = ?1 AND armory_id = ?2').bind(id, armoryId(rawArmoryId));
     const res = await stmt.run();
+    if (res?.meta?.changes) await markSyncWanted(cfg);
     return json(request, 200, { removed: res?.meta?.changes ?? null });
 }
 
@@ -1129,6 +1224,45 @@ async function writeSyncState(db, values) {
 }
 
 /**
+ * Armory sync health for editors' scripts.
+ * @param {Object} env - Worker env.
+ * @param {ReturnType<typeof settings>} cfg - Settings.
+ * @returns {Promise<{configured: boolean, lastOk: (number|null), lastError: string, lastErrorAt: (number|null)}>} Health.
+ */
+async function syncHealth(env, cfg) {
+    const st = await readSyncState(cfg.db);
+    return {
+        configured: Boolean(env.ARMORY_API_KEY),
+        lastOk: Number(st.last_ok) || null,
+        lastError: typeof st.last_error === 'string' ? st.last_error : '',
+        lastErrorAt: Number(st.last_error_at) || null,
+    };
+}
+
+/**
+ * Ask for a sync soon: the 15-minute cron runs one if a trade was logged or
+ * removed since the last sync.
+ * @param {ReturnType<typeof settings>} cfg - Settings.
+ * @returns {Promise<void>}
+ */
+async function markSyncWanted(cfg) {
+    await writeSyncState(cfg.db, { sync_wanted: Date.now() });
+}
+
+/**
+ * Whether the quick cron should sync now: a trade changed since the last
+ * sync started, and the last sync is outside the cooldown.
+ * @param {Object<string, *>} st - readSyncState() result.
+ * @param {number} now - Epoch ms.
+ * @returns {boolean} True to sync.
+ */
+function quickSyncDue(st, now) {
+    const wanted = Number(st.sync_wanted) || 0;
+    const lastRun = Number(st.last_run) || 0;
+    return wanted > lastRun && now - lastRun >= CONFIG.SYNC_COOLDOWN_MS;
+}
+
+/**
  * GET a Torn API v2 path with the armory key (header auth, never in the URL).
  * @param {string} path - Path and query, starting with "/".
  * @param {string} key - Limited API key.
@@ -1279,7 +1413,7 @@ async function runArmorySync(env) {
  */
 async function handleSyncNow(request, env, cfg) {
     const user = await requireUser(request, cfg);
-    requireEditor(user, cfg);
+    await requireEditor(user, cfg);
     if (!env.ARMORY_API_KEY) throw new HttpError(400, 'sync_off', 'Armory sync is not set up (ARMORY_API_KEY secret missing).');
     const st = await readSyncState(cfg.db);
     const wait = (Number(st.last_run) || 0) + CONFIG.SYNC_COOLDOWN_MS - Date.now();
@@ -1287,6 +1421,151 @@ async function handleSyncNow(request, env, cfg) {
     const result = await runArmorySync(env);
     if (!result.ok) throw new HttpError(502, 'sync_failed', result.error);
     return json(request, 200, result);
+}
+
+/* ===========================================================================
+ * Admin: manage editors
+ * ======================================================================== */
+
+/**
+ * Faction member list for the editor picker, from cache (12 hours) or
+ * GET /v2/faction/members (Public; made with ARMORY_API_KEY).
+ * @param {Object} env - Worker env.
+ * @param {ReturnType<typeof settings>} cfg - Settings.
+ * @param {boolean} force - Reload even if the cache is fresh.
+ * @returns {Promise<{members: {id: number, name: string, position: string}[], fetchedAt: (number|null), error: string}>} Members.
+ */
+async function factionMembers(env, cfg, force) {
+    const st = await readSyncState(cfg.db);
+    let cached = [];
+    try {
+        cached = JSON.parse(typeof st.members_json === 'string' ? st.members_json : '[]');
+    } catch {
+        cached = [];
+    }
+    const fetchedAt = Number(st.members_at) || null;
+    if (!force && fetchedAt && Date.now() - fetchedAt < CONFIG.MEMBERS_TTL_MS && cached.length) {
+        return { members: cached, fetchedAt, error: '' };
+    }
+    const key = String(env.ARMORY_API_KEY ?? '').trim();
+    if (!/^[A-Za-z0-9]{16}$/.test(key)) {
+        return { members: cached, fetchedAt, error: 'The member list needs the ARMORY_API_KEY secret. You can still add editors by player ID.' };
+    }
+    try {
+        const data = await tornGet('/faction/members', key);
+        const members = (Array.isArray(data?.members) ? data.members : [])
+            .map((m) => ({ id: Number(m?.id), name: String(m?.name ?? '').slice(0, 32), position: String(m?.position ?? '').slice(0, 40) }))
+            .filter((m) => Number.isInteger(m.id) && m.id > 0)
+            .sort((a, b) => a.name.localeCompare(b.name));
+        if (!members.length) throw new Error('Torn returned no faction members.');
+        const now = Date.now();
+        await writeSyncState(cfg.db, { members_json: JSON.stringify(members), members_at: now });
+        return { members, fetchedAt: now, error: '' };
+    } catch (err) {
+        return { members: cached, fetchedAt, error: `Could not load the member list: ${err instanceof Error ? err.message : String(err)}` };
+    }
+}
+
+/**
+ * Current editors (not including the admin), with names filled in from the
+ * member list where known.
+ * @param {ReturnType<typeof settings>} cfg - Settings.
+ * @param {{id: number, name: string, position: string}[]} members - Member list.
+ * @returns {Promise<Object[]>} Editors.
+ */
+async function editorList(cfg, members) {
+    await loadEditors(cfg); // copies EDITOR_IDS the first time
+    const { results } = await cfg.db.prepare('SELECT * FROM editors ORDER BY player_name, player_id').all();
+    const byId = new Map(members.map((m) => [m.id, m]));
+    // The admin is always an editor and is listed separately (they may also be in the copied EDITOR_IDS).
+    return (results ?? []).filter((r) => Number(r.player_id) !== cfg.adminId).map((r) => {
+        const m = byId.get(Number(r.player_id));
+        return {
+            id: Number(r.player_id),
+            name: m?.name || r.player_name || '',
+            position: m?.position ?? '',
+            inFaction: members.length ? Boolean(m) : null,
+            addedBy: r.added_by_name || '',
+            addedAt: r.added_at || null,
+        };
+    });
+}
+
+/**
+ * GET /admin/editors[?refresh=1] - editors, admin and faction members.
+ * @param {Request} request - Request.
+ * @param {URL} url - Parsed URL.
+ * @param {Object} env - Worker env.
+ * @param {ReturnType<typeof settings>} cfg - Settings.
+ * @returns {Promise<Response>} { admin, editors, members, membersFetchedAt, membersError }.
+ */
+async function handleEditorsGet(request, url, env, cfg) {
+    const user = await requireUser(request, cfg);
+    requireAdmin(user, cfg);
+    const m = await factionMembers(env, cfg, url.searchParams.get('refresh') === '1');
+    return json(request, 200, {
+        admin: { id: cfg.adminId, name: user.name },
+        editors: await editorList(cfg, m.members),
+        members: m.members,
+        membersFetchedAt: m.fetchedAt,
+        membersError: m.error,
+    });
+}
+
+/**
+ * Validate a player ID path value.
+ * @param {string} raw - Candidate.
+ * @returns {number} Player ID.
+ * @throws {HttpError} 400 if invalid.
+ */
+function playerId(raw) {
+    const n = Number(raw);
+    if (!/^\d{1,10}$/.test(String(raw)) || !Number.isInteger(n) || n <= 0) throw new HttpError(400, 'bad_player', 'Invalid player ID.');
+    return n;
+}
+
+/**
+ * PUT /admin/editors/:pid - make a player an editor.
+ * @param {Request} request - Request.
+ * @param {string} rawPid - Player ID.
+ * @param {Object} env - Worker env.
+ * @param {ReturnType<typeof settings>} cfg - Settings.
+ * @returns {Promise<Response>} { editors }.
+ */
+async function handleEditorAdd(request, rawPid, env, cfg) {
+    const user = await requireUser(request, cfg);
+    requireAdmin(user, cfg);
+    const pid = playerId(rawPid);
+    if (pid === cfg.adminId) throw new HttpError(400, 'is_admin', 'You are the admin, so you are always an editor.');
+    const m = await factionMembers(env, cfg, false);
+    const member = m.members.find((x) => x.id === pid);
+    if (m.members.length && !member) throw new HttpError(400, 'not_member', `Player ${pid} is not in the faction member list. Reload the list if they joined recently.`);
+    const editors = await loadEditors(cfg);
+    if (!editors.has(pid) && editors.size >= CONFIG.MAX_EDITORS) throw new HttpError(400, 'too_many', 'Editor limit reached.');
+    await cfg.db.prepare(
+        `INSERT INTO editors (player_id, player_name, added_by_id, added_by_name, added_at) VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(player_id) DO UPDATE SET player_name = excluded.player_name`,
+    ).bind(pid, member?.name ?? '', user.pid, user.name, Date.now()).run();
+    return json(request, 200, { editors: await editorList(cfg, m.members) });
+}
+
+/**
+ * DELETE /admin/editors/:pid - remove an editor (takes effect on their next change).
+ * @param {Request} request - Request.
+ * @param {string} rawPid - Player ID.
+ * @param {Object} env - Worker env.
+ * @param {ReturnType<typeof settings>} cfg - Settings.
+ * @returns {Promise<Response>} { editors }.
+ */
+async function handleEditorRemove(request, rawPid, env, cfg) {
+    const user = await requireUser(request, cfg);
+    requireAdmin(user, cfg);
+    const pid = playerId(rawPid);
+    if (pid === cfg.adminId) throw new HttpError(400, 'is_admin', 'The admin cannot be removed. Change ADMIN_ID in Cloudflare instead.');
+    await loadEditors(cfg); // make sure the legacy list was copied first, so it cannot come back
+    await cfg.db.prepare('DELETE FROM editors WHERE player_id = ?1').bind(pid).run();
+    const m = await factionMembers(env, cfg, false);
+    return json(request, 200, { editors: await editorList(cfg, m.members) });
 }
 
 /* ===========================================================================
@@ -1314,7 +1593,7 @@ export default {
 
             const cfg = settings(env);
             if (path === '/auth' && request.method === 'POST') return await handleAuth(request, cfg);
-            if (path === '/notes' && request.method === 'GET') return await handleList(request, url, cfg);
+            if (path === '/notes' && request.method === 'GET') return await handleList(request, url, env, cfg);
             if (path === '/notes/import' && request.method === 'POST') return await handleImport(request, cfg);
             if (path === '/notes/fingerprints' && request.method === 'POST') return await handleFingerprints(request, cfg);
             if (path === '/items/seen' && request.method === 'POST') return await handleItemsSeen(request, cfg);
@@ -1326,6 +1605,10 @@ export default {
             if (path === '/export.csv' && request.method === 'GET') return await handleExport(request, url, env, cfg);
             if (path === '/view' && request.method === 'GET') return await handleView(request, url, env, cfg);
             if (path === '/armory/sync' && request.method === 'POST') return await handleSyncNow(request, env, cfg);
+            if (path === '/admin/editors' && request.method === 'GET') return await handleEditorsGet(request, url, env, cfg);
+            const ed = path.match(/^\/admin\/editors\/([^/]+)$/);
+            if (ed && request.method === 'PUT') return await handleEditorAdd(request, ed[1], env, cfg);
+            if (ed && request.method === 'DELETE') return await handleEditorRemove(request, ed[1], env, cfg);
             const m = path.match(/^\/notes\/([^/]+)$/);
             if (m && request.method === 'PUT') return await handlePut(request, m[1], cfg);
             if (m && request.method === 'DELETE') return await handleDelete(request, m[1], cfg);
@@ -1340,14 +1623,19 @@ export default {
     },
 
     /**
-     * Cron trigger (wrangler.toml): sync the faction armory.
-     * @param {ScheduledController} event - Event.
+     * Cron triggers (wrangler.toml): the 6-hour full sync always runs; the
+     * 15-minute one only when a trade was logged or removed since the last sync.
+     * @param {ScheduledController} event - Event (event.cron is the schedule string).
      * @param {Object} env - Bindings and variables.
      * @param {ExecutionContext} ctx - Context.
      * @returns {void}
      */
     scheduled(event, env, ctx) {
         if (!env.ARMORY_API_KEY) return;
-        ctx.waitUntil(runArmorySync(env).catch((err) => console.error('Armory sync crashed:', err?.message ?? err)));
+        const run = async () => {
+            if (event.cron === CONFIG.QUICK_SYNC_CRON && !quickSyncDue(await readSyncState(settings(env).db), Date.now())) return;
+            await runArmorySync(env);
+        };
+        ctx.waitUntil(run().catch((err) => console.error('Armory sync crashed:', err?.message ?? err)));
     },
 };

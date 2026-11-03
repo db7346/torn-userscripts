@@ -2,7 +2,7 @@
 
 Attach a colored label and a note to individual weapons and armor. Notes are tied to each item's unique armory ID, so a note stays with that exact MP5k, not every MP5k.
 
-- **Faction notes** (Faction Armory): stored on your faction's own notes server, so every member using the script sees the same notes. Only chosen members can edit them.
+- **Faction notes** (Faction Armory): stored on your faction's own notes server, so every member using the script sees the same notes. Only editors chosen by the notes admin can edit them.
 - **Local notes** (Items page): private to you, stored only in this browser.
 
 **[Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/armory-notes/armory-notes.user.js)** (requires [Tampermonkey](https://www.tampermonkey.net/))
@@ -53,7 +53,8 @@ Everything still works. The Faction Armory then uses your private notes, as in v
 | Refresh faction notes | Fetch the latest faction notes now |
 | Upload local notes to faction | Editors only. Pick local notes to move to the faction. Items seen in the faction armory are pre-ticked. Uploaded notes are removed locally, and items that already have a faction note are skipped. |
 | Trade log (editors) | Recent trades logged with **Log This As Traded**, with Remove buttons for mistakes |
-| Sync armory now (editors) | Ask the server to read the whole faction armory now (it also does so every 6 hours, once set up) |
+| Sync armory now (editors) | Ask the server to read the whole faction armory now (it also does so every 6 hours, and about 15 minutes after a trade is logged) |
+| Manage editors (admin) | Notes admin only: add editors from a list of faction members, or remove them. Takes effect immediately. |
 | Reload faction notes (fix stale data) | Throw away this browser's copy of the faction notes and load them fresh from the server (signs in again). Deletes nothing. |
 | Export local notes (backup) | Downloads `torn-armory-notes-YYYY-MM-DD.json` |
 | Import local notes (restore) | Pick a backup, then **Merge** (newer note wins per item) or **Replace all** |
@@ -94,6 +95,7 @@ That is about **1 Torn API call per 12 hours**, and about **1.3 server requests 
 
 ## Changelog
 
+- **2.7.0**: **Manage editors (admin)**: the notes admin (set once as `ADMIN_ID` on the server) adds and removes editors from the script, no Cloudflare visit needed. Editors on the Faction Armory get a warning when the armory sync failed or is more than 12 hours old. The server re-syncs the armory about 15 minutes after a trade is logged or removed. Needs migration `0006_editors.sql` and the `ADMIN_ID` variable.
 - **2.6.2**: Menu item **Clear faction notes cache** renamed to **Reload faction notes (fix stale data)**, since it deletes nothing.
 - **Server update (no script change)**: view page shows Damage/Accuracy (Defence for armor) as small DMG/ACC/DEF chips beside the item name instead of separate columns, with a **Sort by stat** menu (high→low or low→high).
 - **Server update (no script change)**: view page columns can be dragged into any order (Item stays first). Each viewer's order is saved in their own browser; **Reset columns** restores the default.
