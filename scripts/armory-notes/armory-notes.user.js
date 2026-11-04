@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Armory Notes
 // @namespace    dadgum.torn.armorynotes
-// @version      2.8.2
+// @version      2.8.3
 // @description  Colored labels and notes on individual weapons and armor (keyed by armory ID). Private notes on the Items page; shared faction notes in the Faction Armory.
 // @author       DadGum
 // @license      MIT
@@ -49,6 +49,9 @@
  * Author: DadGum
  *
  * Changelog
+ *   2.8.3 (2026-11-04) API key disclosure brought up to date (no code change):
+ *                      who runs the server, the view page link, and no more
+ *                      Settings / server URL wording.
  *   2.8.2 (2026-11-03) Tampermonkey menu trimmed to five items: editor and
  *                      private-note commands moved into "Editor tools…" and
  *                      "Private notes…" panels; "Reload faction notes" is in
@@ -125,9 +128,12 @@
  * Torn API key usage disclosure
  *   - Key access level: PUBLIC. Only needed for faction notes; local notes
  *     work with no key at all.
+ *   - Who runs the server: your faction's notes admin, on their own
+ *     Cloudflare account. Its address is built into this copy of the script.
  *   - Data storage:
  *       In this browser (Tampermonkey storage): your local notes, your API
- *       key, the server URL, a sign-in token, and a cache of faction notes.
+ *       key, your display choice, a sign-in token, and a cache of faction
+ *       notes.
  *       On your faction's notes server (Cloudflare D1): faction notes and,
  *       for each change, the editor's Torn player ID and name; the faction
  *       armory's bonus weapons/armor (stats, bonuses, who they are loaned
@@ -143,11 +149,14 @@
  *       "Manage editors", at most once per 12 hours unless reloaded. All
  *       calls are tagged comment=ArmoryNotes. Members' keys are never stored.
  *   - Data sharing: faction notes are visible to members of your faction who
- *     use this script. Nothing is shared with anyone else.
+ *     use this script, and to anyone the notes admin gives the view page link
+ *     (a read-only web page of the faction's armory list with notes, who
+ *     items are loaned to, and who edited them). Nothing is shared with
+ *     anyone else.
  *   - Purpose of use: annotating your own and your faction's items.
  *   - Key storage & sharing: the key stays in Tampermonkey storage. It is sent
- *     only over HTTPS, in the body of the sign-in request, to the faction
- *     server set in Settings (about once every 12 hours). The server uses it
+ *     only over HTTPS, in the body of the sign-in request, to your faction's
+ *     notes server (about once every 12 hours). The server uses it
  *     for one Torn API call (user basic,faction) to confirm who you are and
  *     that you are in the faction, then forgets it. The key is never logged
  *     and never put in a URL.

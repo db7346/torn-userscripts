@@ -72,11 +72,12 @@ That is about **1 Torn API call per 12 hours**, and about **1.3 server requests 
 
 | | |
 |---|---|
-| Data storage | **This browser:** your local notes, your API key, display choice, a sign-in token and a cache of faction notes. **Faction server (Cloudflare D1):** faction notes, plus the Torn player ID and name of whoever changed each one, and a change history. |
-| Data sharing | Faction notes are visible to members of your faction who use this script. Nothing is shared with anyone else. |
+| Who runs the server | Your faction's notes admin, on their own Cloudflare account. Its address is built into the script. |
+| Data storage | **This browser:** your local notes, your API key, your display choice, a sign-in token and a cache of faction notes. **Faction server (Cloudflare D1):** faction notes with the Torn player ID and name of whoever changed each one, and a change history; the faction armory's bonus weapons and armor (stats, bonuses, who they're loaned to); trades logged by editors; and the editor list (player ID, name, who added them). **Your API key is not stored on the server.** |
+| Data sharing | Faction notes are visible to members of your faction who use this script, and to anyone the notes admin gives the view page link (a read-only web page of the armory list with notes, who items are loaned to, and who edited them). Nothing is shared with anyone else. |
 | Purpose of use | Annotating your own and your faction's items |
-| Key storage & sharing | Stored only in Tampermonkey storage. Sent over HTTPS, in the body of the sign-in request, only to your faction's notes server (built into the script). The server uses it for one Torn API call and does not store or log it. Never put in a URL. |
-| Key access level | Public |
+| Key storage & sharing | Stored only in Tampermonkey storage. Sent over HTTPS, in the body of the sign-in request (about once every 12 hours), only to your faction's notes server. The server uses it for one Torn API call to confirm who you are and that you're in the faction, then forgets it. It is never stored, logged or put in a URL. |
+| Key access level | **Members: Public.** **Notes admin only:** one Limited key of their own, stored as a server secret (`ARMORY_API_KEY`), used for the armory sync (`faction/inventory`, `torn/itemdetails`) every 6 hours and about 15 minutes after a logged trade, and for the faction member list (`faction/members`) in Manage editors. All calls are tagged `comment=ArmoryNotes`. |
 
 ## Known limitations
 
@@ -92,6 +93,7 @@ That is about **1 Torn API call per 12 hours**, and about **1.3 server requests 
 
 ## Changelog
 
+- **2.8.3**: API key disclosure brought up to date: who runs the server, everything the server stores, the admin's Limited key, and the view page link. No change to how the script works.
 - **2.8.2**: Tampermonkey menu trimmed to five items: **Sign in**, **How it works**, **Refresh faction notes**, **Editor tools…** (editors only) and **Private notes…**. **Reload faction notes** moved into Sign in. **How it works** redesigned: wider, with a legend of the real icons and pills, and an Editors tab.
 - **Server update (no script change)**: view page Bonuses column sorts A→Z by bonus name (highest % first within the same bonus); **Sort by stat** gains **Bonus %**.
 - **2.8.1**: **Sign in** replaces Settings: the faction's server is built in, so the popup only asks for your API key, plus a switch to hide tag icons on items without notes (they then appear when you hover an item). The note editor can't get stuck on "Saving…" any more: Close always works, and after 20 seconds without a reply the form is released with an explanation. The editor shows "Saved ✓" when done, and **Undo** is offered for 10 seconds after saving or deleting a note. A one-time **How it works** guide (also in the Tampermonkey menu and behind **?** in the note editor).
