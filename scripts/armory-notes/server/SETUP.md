@@ -6,7 +6,7 @@ Time needed: about 15 minutes.
 
 ## How it works
 
-- Each member enters a **Public** Torn API key in the script's Settings.
+- Each member enters a **Public** Torn API key with **Sign in** in the Tampermonkey menu.
 - About once every 12 hours the script sends that key to your Worker. The Worker makes one Torn API call (`user` with `basic,faction`) to learn who the member is and which faction they're in, then forgets the key. If they're in your faction, it returns a signed session token.
 - Everyone in the faction can read notes. Only editors can change them. The notes admin (`ADMIN_ID`) picks editors in the script (**Tampermonkey menu > Manage editors (admin)**). The list is checked on every change, so removing someone takes effect immediately.
 - Nobody can pretend to be the admin: the admin's player ID comes from Torn at sign-in (from their own API key) inside a token signed with `TOKEN_SECRET`, and `ADMIN_ID` can only be changed in your Cloudflare account.
@@ -72,16 +72,13 @@ Open your Worker URL, shown on the Worker's overview page (for example `https://
 
 ## 6. Point the script at your server
 
-Pick one of these:
-
-- **Recommended:** In `armory-notes.user.js`, set `DEFAULT_SERVER_URL` in CONFIG to your Worker URL. Bump `@version` and push. Members' Tampermonkey updates automatically, and they only need to enter their key.
-- **Or:** Each member opens **Tampermonkey menu > Settings (faction sharing)** and pastes the URL.
+In `armory-notes.user.js`, set `DEFAULT_SERVER_URL` in CONFIG to your Worker URL. Bump `@version` and push. Members' Tampermonkey updates automatically, and they only need to enter their key. (The URL is built in; members can't change it.)
 
 The script's `@connect workers.dev` already covers `*.workers.dev`. If you later move the Worker to your own domain, add `// @connect yourdomain.com` to the script header.
 
 ## 7. First sign-in (verify in game)
 
-1. Open your Faction Armory. The Settings dialog opens on the first visit.
+1. Open your Faction Armory. The **Sign in** popup opens on the first visit.
 2. Enter your Public key and click **Save & sign in**.
 3. You should see "Signed in as YourName [ID] · Role: admin" (or "editor" if `ADMIN_ID` is not set yet).
 
@@ -199,5 +196,5 @@ The free plan includes 100,000 Worker requests a day and millions of D1 reads. E
 | You are not allowed to edit faction notes | They aren't an editor. Add them with **Manage editors (admin)**. |
 | No admin is set on the server | Add the `ADMIN_ID` variable (step 4). |
 | Only the notes admin can manage editors | You're signed in as someone other than `ADMIN_ID`. |
-| Incorrect API key | The member's key is wrong or was deleted. They re-enter it in Settings. |
-| Faction notes server error (HTTP 404) | Wrong server URL in the script's Settings. |
+| Incorrect API key | The member's key is wrong or was deleted. They re-enter it with **Sign in**. |
+| Faction notes server error (HTTP 404) | Wrong `DEFAULT_SERVER_URL` built into the script (step 6). |

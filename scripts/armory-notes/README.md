@@ -10,7 +10,7 @@ Attach a colored label and a note to individual weapons and armor. Notes are tie
 ## Features
 
 - A tag button next to every Primary, Secondary, Melee and Armor item
-- Click it to add a short label (up to 16 characters), pick one of 8 colors, and write a note (up to 1,000 characters)
+- Click it to add a short label (up to 16 characters), pick one of 8 colors, and write a note (up to 1,000 characters). **Undo** is offered for 10 seconds after each save or delete.
 - The label shows as a colored pill; hover it to read the full note
 - **Faction Armory:** shared faction notes, refreshed every 45 seconds while the tab is visible. Hover shows who edited a note last and when. A **filter bar** above the list searches item names, labels and notes, or shows **Tagged only** / **Untagged bonus items** (on the page currently shown).
 - **Items page:** your private notes (row and thumbnail views), plus a faction pill (with a people icon) when an item has a faction note. Editors can click it to edit or delete the faction note, which is handy for items in your own inventory; everyone else sees it read-only.
@@ -24,10 +24,10 @@ Attach a colored label and a note to individual weapons and armor. Notes are tie
 ### Members
 
 1. Install the script.
-2. Open your Faction Armory. A Settings dialog appears the first time.
+2. Open your Faction Armory. A **Sign in** popup appears the first time.
 3. Enter a **Public** API key ([create one](https://www.torn.com/preferences.php#tab=api), "Public Only" access) and click **Save & sign in**.
 
-The server URL is already filled in. If it's empty, ask your faction's notes admin for it.
+A short **How it works** guide appears once after you sign in. Open it again any time from the Tampermonkey menu, or with **?** in the note editor.
 
 ### Faction notes admin
 
@@ -35,7 +35,7 @@ Set up the server once by following [server/SETUP.md](server/SETUP.md) (Cloudfla
 
 ### No server, no key, or not in the faction?
 
-Everything still works. The Faction Armory then uses your private notes, as in version 1. If sign-in fails because the key is wrong or you're not in the faction, the script remembers that and stops trying until you change Settings.
+Everything still works. The Faction Armory then uses your private notes, as in version 1. If sign-in fails because the key is wrong or you're not in the faction, the script remembers that and stops trying until you sign in again.
 
 ## Editing a note
 
@@ -49,7 +49,8 @@ Everything still works. The Faction Armory then uses your private notes, as in v
 
 | Command | What it does |
 |---|---|
-| Settings (faction sharing) | Set the server URL and your API key; sign in or out |
+| Sign in | Enter your Public API key, sign in or out, and choose whether tag icons show on items without notes |
+| How it works | Short guide to the pills, the filter bar and (for editors) trade logging |
 | Refresh faction notes | Fetch the latest faction notes now |
 | Upload local notes to faction | Editors only. Pick local notes to move to the faction. Items seen in the faction armory are pre-ticked. Uploaded notes are removed locally, and items that already have a faction note are skipped. |
 | Trade log (editors) | Recent trades logged with **Log This As Traded**, with Remove buttons for mistakes |
@@ -77,10 +78,10 @@ That is about **1 Torn API call per 12 hours**, and about **1.3 server requests 
 
 | | |
 |---|---|
-| Data storage | **This browser:** your local notes, your API key, the server URL, a sign-in token and a cache of faction notes. **Faction server (Cloudflare D1):** faction notes, plus the Torn player ID and name of whoever changed each one, and a change history. |
+| Data storage | **This browser:** your local notes, your API key, display choice, a sign-in token and a cache of faction notes. **Faction server (Cloudflare D1):** faction notes, plus the Torn player ID and name of whoever changed each one, and a change history. |
 | Data sharing | Faction notes are visible to members of your faction who use this script. Nothing is shared with anyone else. |
 | Purpose of use | Annotating your own and your faction's items |
-| Key storage & sharing | Stored only in Tampermonkey storage. Sent over HTTPS, in the body of the sign-in request, only to the faction server set in Settings. The server uses it for one Torn API call and does not store or log it. Never put in a URL. |
+| Key storage & sharing | Stored only in Tampermonkey storage. Sent over HTTPS, in the body of the sign-in request, only to your faction's notes server (built into the script). The server uses it for one Torn API call and does not store or log it. Never put in a URL. |
 | Key access level | Public |
 
 ## Known limitations
@@ -97,6 +98,7 @@ That is about **1 Torn API call per 12 hours**, and about **1.3 server requests 
 
 ## Changelog
 
+- **2.8.1**: **Sign in** replaces Settings: the faction's server is built in, so the popup only asks for your API key, plus a switch to hide tag icons on items without notes (they then appear when you hover an item). The note editor can't get stuck on "Saving…" any more: Close always works, and after 20 seconds without a reply the form is released with an explanation. The editor shows "Saved ✓" when done, and **Undo** is offered for 10 seconds after saving or deleting a note. A one-time **How it works** guide (also in the Tampermonkey menu and behind **?** in the note editor).
 - **2.8.0**: Filter bar above the Faction Armory list (everyone). Editors: **Log This As Traded** is highlighted, with a count, when a trade holds faction items that aren't logged yet. Scripts older than the version the faction's server needs show an update notice with a link, at most once a day.
 - **2.7.0**: **Manage editors (admin)**: the notes admin (set once as `ADMIN_ID` on the server) adds and removes editors from the script, no Cloudflare visit needed. Editors on the Faction Armory get a warning when the armory sync failed or is more than 12 hours old. The server re-syncs the armory about 15 minutes after a trade is logged or removed. Needs migration `0006_editors.sql` and the `ADMIN_ID` variable.
 - **2.6.2**: Menu item **Clear faction notes cache** renamed to **Reload faction notes (fix stale data)**, since it deletes nothing.

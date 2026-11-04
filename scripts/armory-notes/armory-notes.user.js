@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Armory Notes
 // @namespace    dadgum.torn.armorynotes
-// @version      2.8.0
+// @version      2.8.1
 // @description  Colored labels and notes on individual weapons and armor (keyed by armory ID). Private notes on the Items page; shared faction notes in the Faction Armory.
 // @author       DadGum
 // @license      MIT
@@ -49,6 +49,13 @@
  * Author: DadGum
  *
  * Changelog
+ *   2.8.1 (2026-11-03) "Sign in" replaces Settings: the faction's server URL
+ *                      is built in, so the popup only asks for the API key,
+ *                      and has a switch to hide tag icons on items without
+ *                      notes. The note editor can no longer get stuck on
+ *                      "Saving…" and shows "Saved" when done. Undo for 10
+ *                      seconds after saving or deleting a note. One-time
+ *                      "How it works" guide (menu item and ? in the editor).
  *   2.8.0 (2026-11-02) Filter bar above the Faction Armory list (search item,
  *                      label or note; Tagged only / Untagged bonus items).
  *                      Editors: "Log This As Traded" is highlighted when a
@@ -196,9 +203,8 @@
 
         /**
          * Your faction's notes server (the Cloudflare Worker URL, e.g.
-         * "https://torn-armory-notes.yourname.workers.dev"). Fill this in before
-         * sharing the script so members only have to enter their key. Leave
-         * empty to start with sharing off; members can still set it in Settings.
+         * "https://torn-armory-notes.yourname.workers.dev"). Built in: members
+         * only enter their API key. Empty = faction sharing off (private notes only).
          */
         DEFAULT_SERVER_URL: 'https://torn-armory-notes.dbeanwomble.workers.dev',
         SETTINGS_KEY: 'tms-armorynotes:settings:v1',
@@ -206,6 +212,14 @@
         SHARED_CACHE_KEY: 'tms-armorynotes:shared:v1',
         SEEN_FACTION_KEY: 'tms-armorynotes:seen:v1',
         SETUP_PROMPTED_KEY: 'tms-armorynotes:setup-prompted:v1',
+        /** Set once the "How it works" guide was shown. */
+        HELP_SEEN_KEY: 'tms-armorynotes:help-seen:v1',
+        /** The note editor stops waiting for the server after this long. */
+        SAVE_WATCHDOG_MS: 20000,
+        /** "Saved" shows in the editor this long before it closes. */
+        SAVED_FLASH_MS: 700,
+        /** How long the Undo button stays after a save or delete. */
+        UNDO_MS: 10000,
         ITEMS_SENT_KEY: 'tms-armorynotes:items-sent:v1',
         /** When the "please update" notice was last shown (epoch ms). */
         UPDATE_NAG_KEY: 'tms-armorynotes:update-nag:v1',
@@ -214,8 +228,6 @@
         SHARED_FETCHED_KEY: 'tms-armorynotes:shared-fetched:v1',
         AUTH_FAILURE_KEY: 'tms-armorynotes:auth-failure:v1',
         SHARED_CACHE_VERSION: 1,
-        /** Server URLs must be HTTPS with no query or fragment. */
-        SERVER_URL_PATTERN: /^https:\/\/[A-Za-z0-9.-]+(?::\d+)?(?:\/[^\s?#]*)?$/,
         API_KEY_PATTERN: /^[A-Za-z0-9]{16}$/,
 
         /** Faction Armory refresh interval while the tab is visible. */
@@ -258,8 +270,8 @@
          */
         TORN_ERRORS: Object.freeze({
             0: 'Unknown Torn API error.',
-            1: 'API key is empty. Enter your key in Settings.',
-            2: 'Incorrect API key. Re-enter it in Settings.',
+            1: 'API key is empty. Enter your key with "Sign in" in the Tampermonkey menu.',
+            2: 'Incorrect API key. Re-enter it with "Sign in" in the Tampermonkey menu.',
             3: 'Wrong request type (script bug, please report).',
             4: 'Wrong fields requested (script bug, please report).',
             5: 'Too many API requests. Waiting a minute before trying again.',
@@ -382,6 +394,7 @@
         kindTrade: `${PREFIX}-btn--trade`,
         btnHidden: `${PREFIX}-btn--hidden`,
         btnReadOnly: `${PREFIX}-btn--ro`,
+        btnHoverOnly: `${PREFIX}-btn--hover`,
         popMeta: `${PREFIX}-pop-meta`,
         checklist: `${PREFIX}-checklist`,
         checkRow: `${PREFIX}-check`,
@@ -426,6 +439,10 @@
         notices: `${PREFIX}-notices`,
         notice: `${PREFIX}-notice`,
         noticeError: `${PREFIX}-notice--error`,
+        noticeBtn: `${PREFIX}-notice-btn`,
+        help: `${PREFIX}-help`,
+        popStatus: `${PREFIX}-pop-status`,
+        popHelp: `${PREFIX}-pop-help`,
         color: (key) => `${PREFIX}-c-${key}`,
     });
 
@@ -519,8 +536,9 @@
     /**
      * Local settings.
      * @typedef {Object} Settings
-     * @property {string} serverUrl - Notes server base URL ('' = sharing off).
-     * @property {string} apiKey    - Torn Public API key ('' = not set).
+     * @property {string} serverUrl     - Notes server base URL (built in: CONFIG.DEFAULT_SERVER_URL).
+     * @property {string} apiKey        - Torn Public API key ('' = not set).
+     * @property {boolean} showEmptyTags - Show tag icons on items without notes (off: only on hover).
      */
 
     /**
@@ -814,21 +832,6 @@
                     bonuses: Data.isBonusText(raw.bonuses) ? raw.bonuses : '',
                 },
             };
-        },
-
-        /**
-         * Validate and tidy a notes-server URL typed by the user.
-         * @param {string} text - Raw input.
-         * @returns {string} URL without trailing slash, or '' when empty.
-         * @throws {Error} If not an https:// URL without query/fragment.
-         */
-        normalizeServerUrl(text) {
-            const url = String(text ?? '').trim().replace(/\/+$/, '');
-            if (!url) return '';
-            if (!CONFIG.SERVER_URL_PATTERN.test(url)) {
-                throw new Error('Server URL must look like https://name.workers.dev (https only, no ? or #).');
-            }
-            return url;
         },
 
         /**
@@ -1195,7 +1198,7 @@
         },
     };
 
-    /* ---- Settings (server URL + API key) ---------------------------------- */
+    /* ---- Settings (API key + display; the server URL is built in) ---------- */
 
     const SettingsStore = {
         /** @type {Settings|null} Memory copy (settings change only through set()). */
@@ -1209,20 +1212,26 @@
             if (!this._mem) {
                 const raw = Storage.readSafe(CONFIG.SETTINGS_KEY, null) ?? {};
                 this._mem = Object.freeze({
-                    serverUrl: typeof raw.serverUrl === 'string' ? raw.serverUrl : CONFIG.DEFAULT_SERVER_URL,
+                    // Built in; a URL saved by an older version is ignored.
+                    serverUrl: CONFIG.DEFAULT_SERVER_URL,
                     apiKey: typeof raw.apiKey === 'string' ? raw.apiKey : '',
+                    showEmptyTags: raw.showEmptyTags !== false,
                 });
             }
             return this._mem;
         },
 
         /**
-         * Save settings.
-         * @param {Settings} settings - New settings (already validated).
+         * Save settings (merged with the current ones; the server URL is not stored).
+         * @param {Partial<Settings>} changes - Fields to change (already validated).
          * @returns {void}
          */
-        set(settings) {
-            Storage.write(CONFIG.SETTINGS_KEY, { serverUrl: settings.serverUrl, apiKey: settings.apiKey });
+        set(changes) {
+            const cur = this.get();
+            Storage.write(CONFIG.SETTINGS_KEY, {
+                apiKey: changes.apiKey ?? cur.apiKey,
+                showEmptyTags: changes.showEmptyTags ?? cur.showEmptyTags,
+            });
             this._mem = null;
         },
     };
@@ -1750,7 +1759,7 @@
          */
         async request(method, path, { body, auth = true, retried = false } = {}) {
             let { serverUrl } = SettingsStore.get();
-            if (!serverUrl) throw new ServerError('not_configured', 'Faction sharing is not set up. Open Settings from the Tampermonkey menu.');
+            if (!serverUrl) throw new ServerError('not_configured', 'Faction sharing is not set up in this copy of the script.');
             const headers = { Accept: 'application/json' };
             if (body !== undefined) headers['Content-Type'] = 'application/json';
             if (auth) {
@@ -1773,7 +1782,7 @@
             const code = typeof e.code === 'string' ? e.code : `http_${res.status}`;
             const message = typeof e.message === 'string' && e.message
                 ? e.message
-                : `Faction notes server error (HTTP ${res.status}). Check the server URL in Settings.`;
+                : `Faction notes server error (HTTP ${res.status}). Try again later.`;
             const err = new ServerError(code, message, {
                 status: res.status,
                 tornCode: Number.isInteger(e.tornCode) ? e.tornCode : undefined,
@@ -1997,7 +2006,7 @@
          */
         async _signIn(settings) {
             if (!settings.apiKey) {
-                throw new ServerError('no_key', 'Add your Public API key in Settings to see faction notes.', { needsKey: true });
+                throw new ServerError('no_key', 'Add your Public API key with "Sign in" in the Tampermonkey menu to see faction notes.', { needsKey: true });
             }
             let data;
             try {
@@ -2130,6 +2139,7 @@
             try {
                 const changed = await SharedStore.refresh();
                 this._lastError = '';
+                maybeShowHelp();
                 if (stateChanged()) rerenderAll();
                 else changed.forEach((id) => refreshId(id));
                 if (changed.length) rescanDynamic();
@@ -2184,6 +2194,9 @@
 .${CLS.kindTrade}{margin:0 4px;max-width:${CONFIG.ITEMS_PILL_MAX_PX}px;box-shadow:inset 0 0 0 1px rgba(255,255,255,.55);
   float:none;vertical-align:middle;}
 .${CLS.btnReadOnly}{cursor:help;}
+.${CLS.btnHoverOnly}{opacity:0 !important;}
+li:hover .${CLS.btnHoverOnly},.${CLS.thumbHost}:hover .${CLS.btnHoverOnly},
+.${CLS.btnHoverOnly}:focus-visible{opacity:.55 !important;}
 .${CLS.btnHidden}{display:none !important;}
 ${colorRules}
 .${CLS.tip}{position:absolute;z-index:${z + 1};max-width:${CONFIG.TOOLTIP_MAX_PX}px;padding:6px 8px;
@@ -2247,6 +2260,16 @@ ${colorRules}
 .${CLS.notice}{padding:8px 10px;max-width:320px;${panel}}
 .${CLS.noticeError}{border-color:#d9534f;}
 .${CLS.notice} a{color:#79c0ff;text-decoration:underline;}
+.${CLS.noticeBtn}{margin-left:6px;padding:1px 8px;}
+.${CLS.help}{max-height:60vh;overflow:auto;margin-bottom:10px;}
+.${CLS.help} h4{margin:8px 0 4px;font-size:12px;color:#3fb950;}
+.${CLS.help} ul{margin:0;padding-left:16px;}
+.${CLS.help} li{margin:3px 0;}
+.${CLS.popStatus}{font-size:11px;color:#ff9b94;margin:4px 0 0;white-space:pre-wrap;}
+.${CLS.popStatus}:empty{display:none;}
+.${CLS.popHelp}{float:right;appearance:none;border:1px solid #3a3f47;background:#14171b;color:#9aa0a6;border-radius:50%;
+  width:18px;height:18px;line-height:16px;padding:0;font:bold 11px Arial,Helvetica,sans-serif;cursor:pointer;margin-left:6px;}
+.${CLS.popHelp}:hover{color:#e6e6e6;border-color:#9aa0a6;}
 .${CLS.logBoxNudge}{border-color:#e3b341;background:rgba(227,179,65,.25);box-shadow:0 0 0 2px rgba(227,179,65,.45);}
 .${CLS.filterBar}{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:6px 8px;font:12px Arial,Helvetica,sans-serif;
   color:inherit;border-bottom:1px solid rgba(128,128,128,.35);}
@@ -2343,7 +2366,8 @@ ${colorRules}
          * Show a small, auto-dismissing message.
          * @param {string} message - Text to show.
          * @param {boolean} [isError=false] - Style as an error.
-         * @param {{link?: {text: string, href: string}, ms?: number}} [opts] - Optional link and duration.
+         * @param {{link?: {text: string, href: string}, action?: {text: string, onClick: () => Promise<void>}, ms?: number}} [opts]
+         *   Optional link, one button (e.g. Undo; the notice closes when it is clicked) and duration.
          * @returns {void}
          */
         show(message, isError = false, opts = {}) {
@@ -2354,6 +2378,15 @@ ${colorRules}
             const item = el('div', { cls: [CLS.notice, isError ? CLS.noticeError : ''], text: `${CONFIG.SCRIPT_NAME}: ${message}` });
             if (opts.link) {
                 item.append(' ', el('a', { text: opts.link.text, attrs: { href: opts.link.href, target: '_blank', rel: 'noopener noreferrer' } }));
+            }
+            if (opts.action) {
+                const b = el('button', { cls: [CLS.uiBtn, CLS.noticeBtn], text: opts.action.text, attrs: { type: 'button' } });
+                b.addEventListener('click', () => {
+                    b.disabled = true;
+                    item.remove();
+                    opts.action.onClick().catch((err) => reportError(opts.action.text, err));
+                });
+                item.append(' ', b);
             }
             this._wrap.append(item);
             setTimeout(() => item.remove(), opts.ms ?? CONFIG.NOTICE_MS * (isError ? 2 : 1));
@@ -2389,7 +2422,7 @@ ${colorRules}
         const message = err instanceof Error ? err.message : String(err);
         if (err instanceof ServerError && err.needsKey && !err.fromCache && !handleSharedError.promptedKey) {
             handleSharedError.promptedKey = true;
-            openSettingsDialog(message);
+            openSignInDialog(message);
         }
         if (quiet && message === Shared._lastError) {
             log(`${context} (repeat): ${message}`);
@@ -2646,6 +2679,8 @@ ${colorRules}
         const note = src.get(btn.dataset[DATA_ID]);
         const editable = isEditable(btn);
         const hidden = !note && (!editable || NOTE_ONLY_KINDS.has(kind));
+        // "Show tag icons on items without notes" off: empty icons appear only on hover/focus.
+        const hoverOnly = !note && !hidden && !SettingsStore.get().showEmptyTags;
         const name = btn.dataset[DATA_NAME] || 'item';
 
         btn.className = [
@@ -2655,6 +2690,7 @@ ${colorRules}
             note ? CLS.color(note.color) : '',
             editable ? '' : CLS.btnReadOnly,
             hidden ? CLS.btnHidden : '',
+            hoverOnly ? CLS.btnHoverOnly : '',
         ].filter(Boolean).join(' ');
 
         btn.replaceChildren();
@@ -2792,44 +2828,114 @@ ${colorRules}
                 return b;
             };
             const deleteBtn = existing ? mkBtn('Delete', CLS.uiDanger, () => remove()) : null;
+            // Stays usable while saving, so the editor can always be closed.
             const cancelBtn = mkBtn('Cancel', '', () => this.close());
             const saveBtn = mkBtn('Save', CLS.uiPrimary, () => save());
+            const statusLine = el('div', { cls: CLS.popStatus, attrs: { role: 'status', 'aria-live': 'polite' } });
 
             /**
-             * Disable the form while a (possibly remote) save runs.
+             * Disable the form while a (possibly remote) save runs. Cancel
+             * turns into Close and stays enabled.
              * @param {boolean} on - Busy state.
              * @param {string} [label] - Save button text while busy.
              * @returns {void}
              */
             const setBusy = (on, label = 'Saving…') => {
                 busy = on;
-                [deleteBtn, cancelBtn, saveBtn, labelInput, textArea, ...swatches].forEach((x) => {
+                [deleteBtn, saveBtn, labelInput, textArea, ...swatches].forEach((x) => {
                     if (x) x.disabled = on;
                 });
                 saveBtn.textContent = on ? label : 'Save';
+                cancelBtn.textContent = on ? 'Close' : 'Cancel';
             };
 
             /**
-             * Run a save/delete, then close and refresh; on failure keep the form open.
+             * Run a save/delete with a safety net: if the server does not
+             * answer within SAVE_WATCHDOG_MS the form is released again (the
+             * change may still arrive). On success shows "Saved"/"Deleted"
+             * briefly, closes, refreshes the item and offers Undo.
              * @param {() => Promise<void>} action - Work to do.
              * @param {string} context - Error context.
              * @param {string} busyLabel - Button text while running.
+             * @param {string} doneLabel - Button text on success.
+             * @param {() => {message: string, undo: () => Promise<void>}|null} undoFor - Undo offer, computed after success.
              * @returns {Promise<void>}
              */
-            const run = async (action, context, busyLabel) => {
+            const run = async (action, context, busyLabel, doneLabel, undoFor) => {
                 if (busy) return;
                 setBusy(true, busyLabel);
+                statusLine.textContent = '';
+                let timedOut = false;
+                const timer = setTimeout(() => {
+                    timedOut = true;
+                    if (this._node !== pop) return;
+                    setBusy(false);
+                    statusLine.textContent = 'No reply from the server. Your change may have saved; reload the page to check before trying again.';
+                }, CONFIG.SAVE_WATCHDOG_MS);
                 try {
                     await action();
-                    if (this._node === pop) this.close();
+                    clearTimeout(timer);
                     refreshId(id);
+                    const offer = undoFor();
+                    if (offer) {
+                        Notice.show(offer.message, false, {
+                            ms: CONFIG.UNDO_MS,
+                            action: {
+                                text: 'Undo',
+                                onClick: async () => {
+                                    try {
+                                        await offer.undo();
+                                        Notice.show('Undone.');
+                                    } catch (err) {
+                                        if (shared) handleSharedError('Undo', err);
+                                        else reportError('Undo', err);
+                                    } finally {
+                                        refreshId(id);
+                                    }
+                                },
+                            },
+                        });
+                    }
+                    if (this._node === pop) {
+                        if (timedOut) {
+                            // The form was already released (the user may be editing again): don't close it.
+                            statusLine.textContent = 'The server answered after all: your change was saved. You can close this.';
+                        } else {
+                            saveBtn.textContent = doneLabel;
+                            setTimeout(() => {
+                                if (this._node === pop) this.close();
+                            }, CONFIG.SAVED_FLASH_MS);
+                        }
+                    }
                 } catch (err) {
+                    clearTimeout(timer);
                     if (this._node === pop) setBusy(false);
                     if (shared) handleSharedError(context, err);
                     else reportError(context, err);
                     refreshId(id); // e.g. editor rights were revoked
                 }
             };
+
+            /**
+             * Fields that put a note back the way it was (for Undo).
+             * @param {Object} n - Earlier note.
+             * @returns {Object} Save fields.
+             */
+            const fieldsOf = (n) => {
+                const f = { label: n.label ?? '', color: n.color ?? CONFIG.DEFAULT_COLOR, text: n.text ?? '', itemName: n.itemName || name, itemId: n.itemId || itemId };
+                if (shared && Data.isFingerprint(n.fingerprint)) {
+                    f.fingerprint = n.fingerprint;
+                    f.bonuses = n.bonuses ?? '';
+                }
+                return f;
+            };
+            // Snapshot of the note before this edit (the store may replace the object).
+            const before = existing ? { ...existing } : null;
+            /** Undo offer after a save or delete: restore `before`, or remove a new note. */
+            const undoOffer = (verb) => () => ({
+                message: `${shared ? 'Faction note' : 'Note'} ${verb} for ${name}.`,
+                undo: () => (before ? src.save(id, fieldsOf(before)) : src.remove(id)),
+            });
 
             const save = () => run(async () => {
                 const label = labelInput.value.trim();
@@ -2844,8 +2950,12 @@ ${colorRules}
                     }
                     await src.save(id, fields);
                 }
-            }, 'Could not save note', 'Saving…');
-            const remove = () => run(() => src.remove(id), 'Could not delete note', 'Deleting…');
+            }, 'Could not save note', 'Saving…', 'Saved ✓', () => {
+                const now = src.get(id);
+                if (!now && !before) return null; // nothing was saved (both fields empty on a new note)
+                return undoOffer(now ? 'saved' : 'deleted')();
+            });
+            const remove = () => run(() => src.remove(id), 'Could not delete note', 'Deleting…', 'Deleted ✓', undoOffer('deleted'));
 
             let meta = null;
             if (shared && existing) {
@@ -2853,7 +2963,10 @@ ${colorRules}
                 meta = el('div', { cls: CLS.popMeta, text: `Last edited by ${who}, ${Data.relativeTime(existing.updated, Date.now())}` });
             }
 
+            const helpBtn = el('button', { cls: CLS.popHelp, text: '?', attrs: { type: 'button', title: 'How Armory Notes works', 'aria-label': 'How Armory Notes works' } });
+            helpBtn.addEventListener('click', () => openHelpDialog());
             const pop = el('div', { cls: CLS.pop, attrs: { role: 'dialog', 'aria-label': `${shared ? 'Faction note' : 'Note'} for ${name}` } }, [
+                helpBtn,
                 el('div', { cls: CLS.popHead, text: name }),
                 el('div', { cls: CLS.popSub, text: shared ? `Faction note · Armory ID #${id}` : `Armory ID #${id}` }),
                 meta,
@@ -2861,6 +2974,7 @@ ${colorRules}
                 datalist,
                 swatchWrap,
                 el('label', { cls: CLS.field }, [el('span', { text: 'Note' }), textArea, counter]),
+                statusLine,
                 el('div', { cls: CLS.actions }, [deleteBtn, el('span', { cls: CLS.spacer }), cancelBtn, saveBtn]),
             ]);
 
@@ -3052,48 +3166,45 @@ ${colorRules}
     }
 
     /**
-     * Open the Settings dialog (server URL + Public API key).
+     * Open the Sign in dialog: Torn API key, plus the tag-icon display switch.
      * @param {string} [reason] - Optional message shown at the top (e.g. why it opened).
      * @returns {void}
      */
-    function openSettingsDialog(reason = '') {
+    function openSignInDialog(reason = '') {
         const current = SettingsStore.get();
-        const urlInput = el('input', { attrs: { type: 'text', placeholder: 'https://torn-armory-notes.example.workers.dev', spellcheck: 'false', autocomplete: 'off' } });
-        urlInput.value = current.serverUrl;
         const keyInput = el('input', { attrs: { type: 'password', maxlength: '16', placeholder: '16-character Public key', autocomplete: 'off', spellcheck: 'false' } });
         keyInput.value = current.apiKey;
         const status = el('div', { cls: CLS.status, text: sessionStatusText() });
+        const tagsBox = /** @type {HTMLInputElement} */ (el('input', { attrs: { type: 'checkbox' } }));
+        tagsBox.checked = current.showEmptyTags;
+        // Applies at once (no sign-in needed).
+        tagsBox.addEventListener('change', () => {
+            SettingsStore.set({ showEmptyTags: tagsBox.checked });
+            refreshAll();
+        });
 
         /**
-         * Validate and store the form, then sign in.
+         * Validate and store the key, then sign in.
          * @returns {Promise<void>}
          */
         const saveAndSignIn = async () => {
-            let serverUrl;
-            try {
-                serverUrl = Data.normalizeServerUrl(urlInput.value);
-            } catch (err) {
-                status.textContent = err.message;
-                return;
-            }
             const apiKey = keyInput.value.trim();
             if (apiKey && !Data.isApiKeyFormat(apiKey)) {
                 status.textContent = 'An API key is 16 letters and numbers. Create a Public key in Torn: Settings > API Keys.';
                 return;
             }
             const before = SettingsStore.get();
-            SettingsStore.set({ serverUrl, apiKey });
+            SettingsStore.set({ apiKey });
             Session.clearFailure(); // an explicit Save always tries again (e.g. after joining the faction)
-            if (before.serverUrl !== serverUrl || before.apiKey !== apiKey) {
+            if (before.apiKey !== apiKey) {
                 Session.clear();
-                if (before.serverUrl !== serverUrl) SharedStore.clear();
                 SharedStore.load();
                 handleSharedError.promptedKey = false;
             }
             onSharingChanged();
-            if (!serverUrl || !apiKey) {
+            if (!apiKey) {
                 status.textContent = sessionStatusText();
-                Notice.show(serverUrl ? 'Saved. Add your API key to see faction notes.' : 'Saved. Faction sharing is off.');
+                Notice.show('Saved. Add your API key to see faction notes.');
                 return;
             }
             status.textContent = 'Signing in…';
@@ -3105,6 +3216,7 @@ ${colorRules}
                 status.textContent = sessionStatusText();
                 Modal.close();
                 Notice.show(`Signed in. ${Object.keys(SharedStore.notes()).length} faction notes loaded.`);
+                maybeShowHelp();
             } catch (err) {
                 rerenderAll();
                 status.textContent = `Sign-in failed: ${err instanceof Error ? err.message : String(err)}`;
@@ -3112,33 +3224,108 @@ ${colorRules}
         };
 
         Modal.open({
-            title: 'Armory Notes settings',
+            title: 'Sign in to Armory Notes',
             message: (reason ? `${reason}\n\n` : '')
-                + 'Faction notes need your faction\'s notes server and a Torn API key with Public access. '
-                + 'The key is stored only in this browser and sent only to that server when you sign in.',
+                + 'Enter a Torn API key with Public access to see your faction\'s notes. '
+                + 'The key is stored only in this browser and sent only to your faction\'s notes server when you sign in.',
             content: [
-                el('label', { cls: CLS.field }, [el('span', { text: 'Faction notes server URL' }), urlInput]),
                 el('label', { cls: CLS.field }, [el('span', { text: 'Torn API key (Public access)' }), keyInput]),
                 status,
+                el('label', { cls: CLS.checkRow }, [tagsBox, el('span', { text: 'Show tag icons on items without notes (off: they appear only when you hover an item)' })]),
             ],
             actions: [
                 {
                     label: 'Sign out',
                     onClick: () => {
-                        SettingsStore.set({ serverUrl: SettingsStore.get().serverUrl, apiKey: '' });
+                        SettingsStore.set({ apiKey: '' });
                         keyInput.value = '';
                         Session.clear();
                         SharedStore.clear();
                         onSharingChanged();
                         status.textContent = sessionStatusText();
-                        Notice.show('Signed out. Your key was removed from this browser.');
+                        Notice.show('Signed out. Your key was removed from this browser. The Faction Armory now shows your private notes.');
                     },
                 },
                 { label: 'Cancel', onClick: () => Modal.close() },
                 { label: 'Save & sign in', variant: 'primary', onClick: saveAndSignIn },
             ],
         });
-        (current.serverUrl ? keyInput : urlInput).focus();
+        keyInput.focus();
+    }
+
+    /**
+     * Text of the "How it works" guide (pure). The editor section is only
+     * shown to editors.
+     * @param {boolean} isEditor - Include the editor section.
+     * @returns {{title: string, items: string[]}[]} Sections.
+     */
+    function helpSections(isEditor) {
+        const sections = [
+            {
+                title: 'Notes and pills',
+                items: [
+                    'Tag icon: your private note. Only you see it, and it lives only in this browser.',
+                    'People icon: a faction note. Everyone in the faction who uses the script sees it.',
+                    'Pills on trade pages are read-only, including on the other person\'s items.',
+                    'The pill colors are whatever labels your faction chose to use them for.',
+                    'Hover a pill to read the full note and see who changed it last, and when.',
+                ],
+            },
+            {
+                title: 'Finding items in the Faction Armory',
+                items: [
+                    'Use the filter bar above the list: search an item, label or note, or pick Tagged only / Untagged bonus items.',
+                    'It searches the armory page you are on. Other pages are not searched.',
+                ],
+            },
+            {
+                title: 'Your private notes',
+                items: [
+                    'They are stored only in this browser. Back them up with "Export local notes" in the Tampermonkey menu.',
+                    'Too many empty tag icons? Turn them off in "Sign in"; they then appear only when you hover an item.',
+                ],
+            },
+        ];
+        if (isEditor) {
+            sections.push({
+                title: 'For editors',
+                items: [
+                    'Click any armory item to tag it. Enter or Ctrl+Enter saves, Esc cancels. After saving or deleting, Undo is available for 10 seconds.',
+                    'Trades: tick "Log This As Traded" in the "This trade expires" bar. It turns yellow when a trade has faction items that are not logged yet.',
+                    'Tampermonkey menu: "Trade log (editors)" lists logged trades with Remove buttons; "Sync armory now (editors)" reads the whole armory right away.',
+                    'A red "Armory sync failed" or "last worked … ago" notice means the automatic sync needs attention: tell the notes admin.',
+                ],
+            });
+        }
+        return sections;
+    }
+
+    /**
+     * Open the "How it works" guide (menu item, ? in the note editor, and
+     * once after the first sign-in).
+     * @returns {void}
+     */
+    function openHelpDialog() {
+        Storage.write(CONFIG.HELP_SEEN_KEY, true);
+        const body = el('div', { cls: CLS.help }, helpSections(Shared.isActive() && Shared.canEdit()).map((sec) =>
+            el('div', {}, [el('h4', { text: sec.title }), el('ul', {}, sec.items.map((t) => el('li', { text: t })))])));
+        Modal.open({
+            title: 'How Armory Notes works',
+            content: [body],
+            actions: [{ label: 'Got it', variant: 'primary', onClick: () => Modal.close() }],
+        });
+    }
+
+    /**
+     * Show the guide once, the first time someone is signed in (never over
+     * another dialog or the note editor).
+     * @returns {void}
+     */
+    function maybeShowHelp() {
+        if (Storage.readSafe(CONFIG.HELP_SEEN_KEY, false)) return;
+        if (!Shared.isActive() || !Session.peek()) return;
+        if (Modal._overlay || Editor._node) return;
+        openHelpDialog();
     }
 
     /**
@@ -3148,7 +3335,7 @@ ${colorRules}
      */
     async function openUploadDialog() {
         if (!Shared.isConfigured() || !SettingsStore.get().apiKey) {
-            openSettingsDialog('Set up faction sharing before uploading notes.');
+            openSignInDialog('Set up faction sharing before uploading notes.');
             return;
         }
         if (NoteStore.isReadOnly()) {
@@ -3490,7 +3677,7 @@ ${colorRules}
      */
     async function syncArmoryNow() {
         if (!Shared.isActive()) {
-            openSettingsDialog('Set up faction sharing first.');
+            openSignInDialog('Set up faction sharing first.');
             return;
         }
         if (!Shared.canEdit()) {
@@ -3522,7 +3709,7 @@ ${colorRules}
      */
     async function openTradeLogDialog() {
         if (!Shared.isActive()) {
-            openSettingsDialog('Set up faction sharing first.');
+            openSignInDialog('Set up faction sharing first.');
             return;
         }
         if (!Shared.canEdit()) {
@@ -3623,7 +3810,7 @@ ${colorRules}
      */
     async function openEditorsDialog() {
         if (!Shared.isActive()) {
-            openSettingsDialog('Set up faction sharing first.');
+            openSignInDialog('Set up faction sharing first.');
             return;
         }
         // Known non-admin (the flag comes with every notes refresh): answer locally.
@@ -4364,13 +4551,7 @@ ${colorRules}
         if (!Shared.isConfigured() || SettingsStore.get().apiKey) return;
         if (Storage.readSafe(CONFIG.SETUP_PROMPTED_KEY, false)) return;
         Storage.write(CONFIG.SETUP_PROMPTED_KEY, true);
-        let host = SettingsStore.get().serverUrl;
-        try {
-            host = new URL(host).host;
-        } catch (err) {
-            log('Server URL is not a valid URL');
-        }
-        openSettingsDialog(`Welcome! This copy of Armory Notes shares faction notes through ${host}. `
+        openSignInDialog('Welcome! This copy of Armory Notes shares notes with your faction. '
             + 'If you are in that faction, add a Public API key to see them. '
             + 'If not, click Cancel: the Faction Armory will use your private notes instead.');
     }
@@ -4426,10 +4607,11 @@ ${colorRules}
                 reportError(label, err);
             }
         };
-        GM_registerMenuCommand('Settings (faction sharing)', guard('Settings', () => openSettingsDialog()));
+        GM_registerMenuCommand('Sign in', guard('Sign in', () => openSignInDialog()));
+        GM_registerMenuCommand('How it works', guard('How it works', openHelpDialog));
         GM_registerMenuCommand('Refresh faction notes', guard('Refresh', () => {
             if (!Shared.isActive()) {
-                openSettingsDialog(Session.isBlocked() ? `Faction notes are off: ${Session.failureMessage()}` : 'Set up faction sharing first.');
+                openSignInDialog(Session.isBlocked() ? `Faction notes are off: ${Session.failureMessage()}` : 'Set up faction sharing first.');
                 return;
             }
             Shared.refreshAndRender().then((ok) => {
