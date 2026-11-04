@@ -8,7 +8,7 @@ Time needed: about 15 minutes.
 
 - Each member enters a **Public** Torn API key with **Sign in** in the Tampermonkey menu.
 - About once every 12 hours the script sends that key to your Worker. The Worker makes one Torn API call (`user` with `basic,faction`) to learn who the member is and which faction they're in, then forgets the key. If they're in your faction, it returns a signed session token.
-- Everyone in the faction can read notes. Only editors can change them. The notes admin (`ADMIN_ID`) picks editors in the script (**Tampermonkey menu > Manage editors (admin)**). The list is checked on every change, so removing someone takes effect immediately.
+- Everyone in the faction can read notes. Only editors can change them. The notes admin (`ADMIN_ID`) picks editors in the script (**Tampermonkey menu > Editor tools… > Manage editors**). The list is checked on every change, so removing someone takes effect immediately.
 - Nobody can pretend to be the admin: the admin's player ID comes from Torn at sign-in (from their own API key) inside a token signed with `TOKEN_SECRET`, and `ADMIN_ID` can only be changed in your Cloudflare account.
 - Every change is also written to a history table (`note_log`), so mistakes can be undone by hand.
 
@@ -84,7 +84,7 @@ The script's `@connect workers.dev` already covers `*.workers.dev`. If you later
 
 This also confirms that Torn's API answers requests from Cloudflare. If sign-in fails with "Could not reach the Torn API", check the Worker's **Logs** tab and tell the script author.
 
-Then use **Tampermonkey menu > Upload local notes to faction** to move your existing notes over.
+Then use **Tampermonkey menu > Editor tools… > Upload local notes** to move your existing notes over.
 
 ## Updating an existing server
 
@@ -137,7 +137,7 @@ For separate tabs, use `&type=weapons` and `&type=armor` on the export link (one
 
 Editors see a **Log This As Traded** checkbox in the "This trade expires…" bar on a trade. Ticking it logs that trade's bonus weapons and armor that are armory items or have a faction note: yours as "Traded to <them>", theirs (matched by stats) as "Traded to <you>". Other items are ignored. While an item you received is still out of the armory, its Status reads **Returned to <you> (not deposited)**; the next armory sync after you deposit it changes that to **In armory**. Untick it to remove the log.
 
-To fix a mistake later, use **Tampermonkey menu > Trade log (editors)**: it lists recent logged trades with a **Remove** button per item and per trade. The sheet itself is read-only (Google re-imports it), so make corrections there, not in the sheet.
+To fix a mistake later, use **Tampermonkey menu > Editor tools… > Trade log**: it lists recent logged trades with a **Remove** button per item and per trade. The sheet itself is read-only (Google re-imports it), so make corrections there, not in the sheet.
 
 **Keep the link private.** Anyone with it, or anyone who can see the formula in the sheet, can read every faction note. If it leaks, change `EXPORT_TOKEN`, click Deploy, and update the formula; the old link stops working immediately.
 
@@ -150,7 +150,7 @@ It needs **one Limited API key of the notes admin's own**, from a player with **
 1. Create a key in Torn (Settings > API Keys) with **Limited** access. Name it "Armory Notes sync".
 2. In the Worker's **Settings > Runtime variables and secrets**, add a **Secret** named `ARMORY_API_KEY` with that key, then click **Deploy**.
 3. Because a dashboard change can bring back older code, open **Deployments** and use **Retry build** on the newest GitHub commit.
-4. In Torn, use **Tampermonkey menu > Sync armory now (editors)** for the first run. After that it runs every 6 hours by itself, and about 15 minutes after an editor logs or removes a trade (`[triggers]` in `wrangler.toml`).
+4. In Torn, use **Tampermonkey menu > Editor tools… > Sync armory now** for the first run. After that it runs every 6 hours by itself, and about 15 minutes after an editor logs or removes a trade (`[triggers]` in `wrangler.toml`).
 
 If the sync fails (for example the key was deleted or lost faction API access) or hasn't worked for 12 hours, editors see a warning when they open the Faction Armory.
 
@@ -174,7 +174,7 @@ Anyone with the link can view the list. To revoke it, change `VIEW_TOKEN` and cl
 
 | Task | How |
 |---|---|
-| Add or remove an editor | **Tampermonkey menu > Manage editors (admin)**. Takes effect immediately. |
+| Add or remove an editor | **Tampermonkey menu > Editor tools… > Manage editors**. Takes effect immediately. |
 | Change the admin | Change `ADMIN_ID` in **Settings > Variables and Secrets**, click **Deploy**, then **Retry build** on the latest commit. |
 | Force everyone to sign in again | Change `TOKEN_SECRET`. Scripts re-sign-in automatically with their stored key. |
 | See who changed what | D1 **Console**: `SELECT * FROM note_log ORDER BY at DESC LIMIT 50;` |
@@ -193,7 +193,7 @@ The free plan includes 100,000 Worker requests a day and millions of D1 reads. E
 | Server is missing FACTION_ID / TOKEN_SECRET | Step 4 is incomplete, or `TOKEN_SECRET` is shorter than 16 characters. |
 | Server is missing the DB (D1) binding | The `database_id` in `wrangler.toml` is wrong, or step 2 wasn't committed. |
 | Faction notes are only available to members of this faction | Wrong `FACTION_ID`, or the player isn't in the faction. |
-| You are not allowed to edit faction notes | They aren't an editor. Add them with **Manage editors (admin)**. |
+| You are not allowed to edit faction notes | They aren't an editor. Add them with **Editor tools… > Manage editors**. |
 | No admin is set on the server | Add the `ADMIN_ID` variable (step 4). |
 | Only the notes admin can manage editors | You're signed in as someone other than `ADMIN_ID`. |
 | Incorrect API key | The member's key is wrong or was deleted. They re-enter it with **Sign in**. |

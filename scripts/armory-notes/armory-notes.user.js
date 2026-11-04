@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Armory Notes
 // @namespace    dadgum.torn.armorynotes
-// @version      2.8.1
+// @version      2.8.2
 // @description  Colored labels and notes on individual weapons and armor (keyed by armory ID). Private notes on the Items page; shared faction notes in the Faction Armory.
 // @author       DadGum
 // @license      MIT
@@ -49,6 +49,11 @@
  * Author: DadGum
  *
  * Changelog
+ *   2.8.2 (2026-11-03) Tampermonkey menu trimmed to five items: editor and
+ *                      private-note commands moved into "Editor tools…" and
+ *                      "Private notes…" panels; "Reload faction notes" is in
+ *                      Sign in. "How it works" redesigned: wider, tabbed,
+ *                      with a legend of the real icons and pills.
  *   2.8.1 (2026-11-03) "Sign in" replaces Settings: the faction's server URL
  *                      is built in, so the popup only asks for the API key,
  *                      and has a switch to hide tag icons on items without
@@ -441,6 +446,14 @@
         noticeError: `${PREFIX}-notice--error`,
         noticeBtn: `${PREFIX}-notice-btn`,
         help: `${PREFIX}-help`,
+        helpTabs: `${PREFIX}-help-tabs`,
+        helpTab: `${PREFIX}-help-tab`,
+        legend: `${PREFIX}-legend`,
+        tips: `${PREFIX}-tips`,
+        modalWide: `${PREFIX}-modal--wide`,
+        toolList: `${PREFIX}-tools`,
+        sample: `${PREFIX}-sample`,
+        inlineRow: `${PREFIX}-inline`,
         popStatus: `${PREFIX}-pop-status`,
         popHelp: `${PREFIX}-pop-help`,
         color: (key) => `${PREFIX}-c-${key}`,
@@ -1827,9 +1840,9 @@
             if (lastErrorAt > lastOk && h.lastError) {
                 return `Armory sync failed (${h.lastError}). Check that the sync key still exists in Torn and that its owner has faction API access.`;
             }
-            if (!lastOk) return 'The armory sync has not run yet. Use "Sync armory now (editors)" in the Tampermonkey menu.';
+            if (!lastOk) return 'The armory sync has not run yet. Use Tampermonkey menu > Editor tools > Sync armory now.';
             if (now - lastOk > CONFIG.SYNC_STALE_MS) {
-                return `The armory sync last worked ${Data.relativeTime(lastOk, now)} (it should run every 6 hours). Try "Sync armory now (editors)".`;
+                return `The armory sync last worked ${Data.relativeTime(lastOk, now)} (it should run every 6 hours). Try Tampermonkey menu > Editor tools > Sync armory now.`;
             }
             return '';
         },
@@ -2037,6 +2050,7 @@
             UpdateCheck.check(data.minScriptVersion);
             this._mem = session;
             Storage.write(CONFIG.SESSION_KEY, session);
+            ensureEditorMenu();
             log('Signed in as', session.player.name, session.canEdit ? '(editor)' : '(viewer)');
             return session;
         },
@@ -2072,6 +2086,7 @@
             if (!s || s.canEdit === canEdit) return;
             s.canEdit = canEdit;
             Storage.write(CONFIG.SESSION_KEY, s);
+            ensureEditorMenu();
         },
 
         /**
@@ -2261,10 +2276,31 @@ ${colorRules}
 .${CLS.noticeError}{border-color:#d9534f;}
 .${CLS.notice} a{color:#79c0ff;text-decoration:underline;}
 .${CLS.noticeBtn}{margin-left:6px;padding:1px 8px;}
-.${CLS.help}{max-height:60vh;overflow:auto;margin-bottom:10px;}
-.${CLS.help} h4{margin:8px 0 4px;font-size:12px;color:#3fb950;}
-.${CLS.help} ul{margin:0;padding-left:16px;}
-.${CLS.help} li{margin:3px 0;}
+.${CLS.modalWide}{width:560px;}
+.${CLS.help}{margin-bottom:12px;}
+.${CLS.help} > div > h4:first-child{margin-top:0;}
+.${CLS.helpTabs}{display:flex;gap:4px;border-bottom:1px solid #3a3f47;margin:0 0 12px;}
+.${CLS.helpTab}{appearance:none;border:1px solid transparent;border-bottom:none;background:none;color:#9aa0a6;
+  font:bold 12px Arial,Helvetica,sans-serif;padding:6px 12px;border-radius:5px 5px 0 0;cursor:pointer;margin-bottom:-1px;}
+.${CLS.helpTab}[aria-selected="true"]{background:#14171b;color:#e6e6e6;border-color:#3a3f47;}
+.${CLS.help} h4{margin:14px 0 8px;font-size:12px;color:#3fb950;text-transform:uppercase;letter-spacing:.04em;}
+.${CLS.legend}{display:grid;grid-template-columns:118px 1fr;gap:9px 14px;align-items:center;margin-bottom:14px;}
+.${CLS.legend} > div:nth-child(odd){display:flex;align-items:center;gap:6px;}
+.${CLS.legend} .${CLS.btn}{cursor:default;margin:0;pointer-events:none;}
+.${CLS.legend} .${CLS.btnEmpty}{opacity:.9;color:#bbb;}
+.${CLS.legend} .${CLS.logBox}{position:static;transform:none;pointer-events:none;}
+.${CLS.tips}{margin:0;padding:0;list-style:none;border-top:1px solid #3a3f47;}
+.${CLS.tips} li{padding:7px 0 7px 14px;border-bottom:1px solid #2a2f36;position:relative;line-height:1.45;}
+.${CLS.tips} li::before{content:"";position:absolute;left:2px;top:13px;width:5px;height:5px;border-radius:50%;background:#3fb950;}
+.${CLS.tips} b{color:#e6e6e6;}
+.${CLS.sample}{margin:0 0 12px;}
+.${CLS.sample} .${CLS.logBox}{position:static;transform:none;display:inline-flex;pointer-events:none;}
+.${CLS.inlineRow}{display:flex;align-items:center;gap:8px;margin:10px 0 14px;padding-top:10px;border-top:1px solid #3a3f47;
+  color:#9aa0a6;font-size:11px;}
+.${CLS.toolList}{display:flex;flex-direction:column;gap:8px;margin:4px 0 12px;}
+.${CLS.toolList} > div{display:grid;grid-template-columns:150px 1fr;gap:10px;align-items:center;}
+.${CLS.toolList} .${CLS.uiBtn}{width:100%;}
+.${CLS.toolList} span{color:#9aa0a6;font-size:11px;}
 .${CLS.popStatus}{font-size:11px;color:#ff9b94;margin:4px 0 0;white-space:pre-wrap;}
 .${CLS.popStatus}:empty{display:none;}
 .${CLS.popHelp}{float:right;appearance:none;border:1px solid #3a3f47;background:#14171b;color:#9aa0a6;border-radius:50%;
@@ -2549,9 +2585,10 @@ ${colorRules}
          * @param {Node[]} [opts.content] - Extra nodes under the message.
          * @param {{label: string, variant?: 'primary'|'danger', disabled?: boolean, onClick: () => (void|Promise<void>)}[]} opts.actions
          *   Buttons. An async onClick disables all buttons until it settles.
+         * @param {boolean} [opts.wide=false] - Wider dialog (the guide).
          * @returns {HTMLButtonElement[]} The action buttons, in order.
          */
-        open({ title, message = '', content = [], actions }) {
+        open({ title, message = '', content = [], actions, wide = false }) {
             this.close();
             Editor.close();
             /** @type {HTMLButtonElement[]} */
@@ -2581,7 +2618,7 @@ ${colorRules}
                 });
                 return b;
             });
-            const box = el('div', { cls: CLS.modal, attrs: { role: 'dialog', 'aria-modal': 'true', 'aria-label': title } }, [
+            const box = el('div', { cls: [CLS.modal, wide ? CLS.modalWide : ''], attrs: { role: 'dialog', 'aria-modal': 'true', 'aria-label': title } }, [
                 el('h3', { text: title }),
                 message ? el('div', { cls: CLS.modalBody, text: message }) : null,
                 ...content,
@@ -3183,6 +3220,13 @@ ${colorRules}
             refreshAll();
         });
 
+        const reloadBtn = el('button', { cls: CLS.uiBtn, text: 'Reload faction notes', attrs: { type: 'button' } });
+        reloadBtn.addEventListener('click', () => {
+            Modal.close();
+            reloadFactionNotes();
+        });
+        const reloadRow = el('div', { cls: CLS.inlineRow }, [el('span', { text: 'Faction notes look out of date?' }), reloadBtn]);
+
         /**
          * Validate and store the key, then sign in.
          * @returns {Promise<void>}
@@ -3232,6 +3276,7 @@ ${colorRules}
                 el('label', { cls: CLS.field }, [el('span', { text: 'Torn API key (Public access)' }), keyInput]),
                 status,
                 el('label', { cls: CLS.checkRow }, [tagsBox, el('span', { text: 'Show tag icons on items without notes (off: they appear only when you hover an item)' })]),
+                reloadRow,
             ],
             actions: [
                 {
@@ -3254,50 +3299,89 @@ ${colorRules}
     }
 
     /**
-     * Text of the "How it works" guide (pure). The editor section is only
-     * shown to editors.
-     * @param {boolean} isEditor - Include the editor section.
-     * @returns {{title: string, items: string[]}[]} Sections.
+     * A non-interactive copy of a note pill, for the guide's legend.
+     * @param {{kind: string, label?: string, color?: string, shared?: boolean}} o - Look.
+     * @returns {HTMLElement} Sample pill.
      */
-    function helpSections(isEditor) {
-        const sections = [
-            {
-                title: 'Notes and pills',
-                items: [
-                    'Tag icon: your private note. Only you see it, and it lives only in this browser.',
-                    'People icon: a faction note. Everyone in the faction who uses the script sees it.',
-                    'Pills on trade pages are read-only, including on the other person\'s items.',
-                    'The pill colors are whatever labels your faction chose to use them for.',
-                    'Hover a pill to read the full note and see who changed it last, and when.',
-                ],
-            },
-            {
-                title: 'Finding items in the Faction Armory',
-                items: [
-                    'Use the filter bar above the list: search an item, label or note, or pick Tagged only / Untagged bonus items.',
-                    'It searches the armory page you are on. Other pages are not searched.',
-                ],
-            },
-            {
-                title: 'Your private notes',
-                items: [
-                    'They are stored only in this browser. Back them up with "Export local notes" in the Tampermonkey menu.',
-                    'Too many empty tag icons? Turn them off in "Sign in"; they then appear only when you hover an item.',
-                ],
-            },
-        ];
+    function samplePill({ kind, label = '', color = '', shared = false }) {
+        const pill = el('span', {
+            cls: [CLS.btn, KIND_CLASS[kind] ?? CLS.kindPill, label ? CLS.btnNote : CLS.btnEmpty, label ? CLS.color(color) : ''],
+            attrs: { 'aria-hidden': 'true' },
+        });
+        if (shared) pill.append(createSharedIcon());
+        if (label) pill.append(el('span', { cls: CLS.label, text: label }));
+        else pill.append(createTagIcon());
+        return pill;
+    }
+
+    /**
+     * One legend row: sample(s) on the left, explanation on the right.
+     * @param {Node[]} samples - Sample elements.
+     * @param {string} text - Explanation.
+     * @returns {HTMLElement[]} The two grid cells.
+     */
+    function legendRow(samples, text) {
+        return [el('div', {}, samples), el('div', { text })];
+    }
+
+    /**
+     * Tips list; "**x**" in a tip becomes bold (built with textContent only).
+     * @param {string[]} tips - Lines.
+     * @returns {HTMLElement} List.
+     */
+    function tipList(tips) {
+        return el('ul', { cls: CLS.tips }, tips.map((t) => el('li', {}, t.split(/\*\*(.+?)\*\*/).map((part, i) => (i % 2 ? el('b', { text: part }) : document.createTextNode(part))))));
+    }
+
+    /**
+     * Guide content: "Basics" for everyone, "Editors" for editors.
+     * @param {boolean} isEditor - Include the Editors tab.
+     * @returns {{name: string, body: HTMLElement}[]} Tabs.
+     */
+    function helpTabs(isEditor) {
+        const basics = el('div', {}, [
+            el('h4', { text: 'What you will see' }),
+            el('div', { cls: CLS.legend }, [
+                ...legendRow([samplePill({ kind: 'pill' })], 'Empty tag: click it to add your own private note.'),
+                ...legendRow([samplePill({ kind: 'pill', label: 'Keep', color: 'blue' }), samplePill({ kind: 'pill', label: 'Sell', color: 'green' })],
+                    'Your private note. Only you see it, and it is stored only in this browser.'),
+                ...legendRow([samplePill({ kind: 'shared', label: 'War', color: 'red', shared: true })],
+                    'Faction note (people icon). Everyone in the faction with the script sees it.'),
+                ...legendRow([samplePill({ kind: 'trade', label: 'War', color: 'red', shared: true })],
+                    'On trade pages faction notes are read-only, on your items and the other person\'s.'),
+            ]),
+            el('h4', { text: 'Tips' }),
+            tipList([
+                '**Hover** any pill to read the full note and see who edited it last, and when.',
+                '**Filter bar** above the Faction Armory: search by label or note, or show tagged / untagged items (on the page you are viewing).',
+                '**Back up** your private notes: Tampermonkey menu > Private notes.',
+                '**Too many tag icons?** Turn them off in Sign in; they then appear only when you hover an item.',
+            ]),
+        ]);
+        const tabs = [{ name: 'Basics', body: basics }];
         if (isEditor) {
-            sections.push({
-                title: 'For editors',
-                items: [
-                    'Click any armory item to tag it. Enter or Ctrl+Enter saves, Esc cancels. After saving or deleting, Undo is available for 10 seconds.',
-                    'Trades: tick "Log This As Traded" in the "This trade expires" bar. It turns yellow when a trade has faction items that are not logged yet.',
-                    'Tampermonkey menu: "Trade log (editors)" lists logged trades with Remove buttons; "Sync armory now (editors)" reads the whole armory right away.',
-                    'A red "Armory sync failed" or "last worked … ago" notice means the automatic sync needs attention: tell the notes admin.',
-                ],
+            const box = el('label', { cls: [CLS.logBox, CLS.logBoxNudge], attrs: { 'aria-hidden': 'true' } },
+                [el('input', { attrs: { type: 'checkbox', tabindex: '-1' } }), el('span', { text: 'Log This As Traded (2 faction items)' })]);
+            tabs.push({
+                name: 'Editors',
+                body: el('div', {}, [
+                    el('h4', { text: 'Trades' }),
+                    el('div', { cls: CLS.sample }, [box]),
+                    tipList([
+                        'Tick **Log This As Traded** in the "This trade expires" bar to record the trade. It turns yellow when a trade has faction items that are not logged yet.',
+                        'Made a mistake? Untick it, or use **Editor tools > Trade log** to remove an entry.',
+                    ]),
+                    el('h4', { text: 'Notes' }),
+                    tipList([
+                        '**Click** any armory item to tag it. **Enter** or **Ctrl+Enter** saves, **Esc** cancels.',
+                        '**Undo** appears for 10 seconds after you save or delete a note.',
+                        '**Editor tools** (Tampermonkey menu): Trade log, Sync armory now, Upload local notes, and Manage editors (admin).',
+                        'A red **"Armory sync failed"** or **"last worked … ago"** notice means the automatic sync needs attention: tell the notes admin.',
+                    ]),
+                ]),
             });
         }
-        return sections;
+        return tabs;
     }
 
     /**
@@ -3307,12 +3391,24 @@ ${colorRules}
      */
     function openHelpDialog() {
         Storage.write(CONFIG.HELP_SEEN_KEY, true);
-        const body = el('div', { cls: CLS.help }, helpSections(Shared.isActive() && Shared.canEdit()).map((sec) =>
-            el('div', {}, [el('h4', { text: sec.title }), el('ul', {}, sec.items.map((t) => el('li', { text: t })))])));
+        const tabs = helpTabs(Shared.isActive() && Shared.canEdit());
+        const body = el('div', { cls: CLS.help });
+        const bar = el('div', { cls: CLS.helpTabs, attrs: { role: 'tablist' } });
+        const show = (i) => {
+            body.replaceChildren(tabs[i].body);
+            [...bar.children].forEach((b, j) => b.setAttribute('aria-selected', String(i === j)));
+        };
+        tabs.forEach((t, i) => {
+            const b = el('button', { cls: CLS.helpTab, text: t.name, attrs: { type: 'button', role: 'tab' } });
+            b.addEventListener('click', () => show(i));
+            bar.append(b);
+        });
+        show(0);
         Modal.open({
             title: 'How Armory Notes works',
-            content: [body],
+            content: tabs.length > 1 ? [bar, body] : [body],
             actions: [{ label: 'Got it', variant: 'primary', onClick: () => Modal.close() }],
+            wide: true,
         });
     }
 
@@ -4596,50 +4692,128 @@ ${colorRules}
      * ====================================================================== */
 
     /**
-     * Register Tampermonkey menu commands.
+     * Throw away this browser's copy of the faction notes and load them again
+     * (signs in again). Deletes nothing.
      * @returns {void}
      */
-    function registerMenu() {
-        const guard = (label, fn) => () => {
+    function reloadFactionNotes() {
+        SharedStore.clear();
+        Session.clear();
+        refreshAll();
+        Notice.show('Reloading faction notes from the server. Nothing was deleted.');
+        if (PageState.factionArmoryOpen) Shared.refreshAndRender();
+    }
+
+    /**
+     * A panel of buttons, each with a one-line description (used for the
+     * grouped Tampermonkey menu items).
+     * @param {string} title - Dialog title.
+     * @param {string} message - Intro text.
+     * @param {{label: string, help: string, danger?: boolean, run: () => (void|Promise<void>)}[]} tools - Buttons.
+     * @returns {void}
+     */
+    function openToolPanel(title, message, tools) {
+        const list = el('div', { cls: CLS.toolList }, tools.map((t) => {
+            const b = el('button', { cls: [CLS.uiBtn, t.danger ? CLS.uiDanger : ''], text: t.label, attrs: { type: 'button' } });
+            b.addEventListener('click', () => {
+                Modal.close();
+                Promise.resolve()
+                    .then(() => t.run())
+                    .catch((err) => reportError(t.label, err));
+            });
+            return el('div', {}, [b, el('span', { text: t.help })]);
+        }));
+        Modal.open({ title, message, content: [list], actions: [{ label: 'Close', onClick: () => Modal.close() }] });
+    }
+
+    /**
+     * Tampermonkey menu: editor tools (trade log, sync, upload; Manage editors for the admin).
+     * @returns {void}
+     */
+    function openEditorTools() {
+        if (!Shared.isActive()) {
+            openSignInDialog('Sign in first.');
+            return;
+        }
+        if (!Shared.canEdit()) {
+            Notice.show('Editor tools are only for faction note editors.');
+            return;
+        }
+        const tools = [
+            { label: 'Trade log', help: 'Trades logged with "Log This As Traded"; remove mistakes.', run: openTradeLogDialog },
+            { label: 'Sync armory now', help: 'Read the whole faction armory now (it also runs every 6 hours).', run: syncArmoryNow },
+            { label: 'Upload local notes', help: 'Move your private notes into faction notes.', run: openUploadDialog },
+        ];
+        if (Session.peek()?.isAdmin) {
+            tools.push({ label: 'Manage editors', help: 'Admin: add or remove editors.', run: openEditorsDialog });
+        }
+        openToolPanel('Editor tools', '', tools);
+    }
+
+    /**
+     * Tampermonkey menu: private (local) notes backup tools.
+     * @returns {void}
+     */
+    function openPrivateNotesTools() {
+        const n = NoteStore.count();
+        openToolPanel('Private notes', `${n} private note${n === 1 ? '' : 's'} stored in this browser.`, [
+            { label: 'Export backup', help: 'Download your private notes as a file.', run: openExportDialog },
+            { label: 'Import', help: 'Restore from a backup file (merge or replace).', run: openImportDialog },
+            { label: 'Clear all', help: 'Delete every private note in this browser.', danger: true, run: openClearDialog },
+        ]);
+    }
+
+    /** Whether "Editor tools…" was added to the menu (it is added once someone is known to be an editor). */
+    let editorMenuAdded = false;
+
+    /**
+     * Add "Editor tools…" to the Tampermonkey menu once the user is an
+     * editor (at start-up from the saved session, or after signing in).
+     * @param {(label: string, fn: () => void) => () => void} [guard] - Error wrapper.
+     * @returns {void}
+     */
+    function ensureEditorMenu(guard = menuGuard) {
+        if (editorMenuAdded || !Session.peek()?.canEdit) return;
+        editorMenuAdded = true;
+        GM_registerMenuCommand('Editor tools…', guard('Editor tools', openEditorTools));
+    }
+
+    /**
+     * Wrap a menu handler so errors are reported, not thrown.
+     * @param {string} label - Context for errors.
+     * @param {() => void} fn - Handler.
+     * @returns {() => void} Wrapped handler.
+     */
+    function menuGuard(label, fn) {
+        return () => {
             try {
                 fn();
             } catch (err) {
                 reportError(label, err);
             }
         };
+    }
+
+    /**
+     * Register Tampermonkey menu commands: Sign in, How it works, Refresh
+     * faction notes, Editor tools… (editors only) and Private notes….
+     * @returns {void}
+     */
+    function registerMenu() {
+        const guard = menuGuard;
         GM_registerMenuCommand('Sign in', guard('Sign in', () => openSignInDialog()));
         GM_registerMenuCommand('How it works', guard('How it works', openHelpDialog));
         GM_registerMenuCommand('Refresh faction notes', guard('Refresh', () => {
             if (!Shared.isActive()) {
-                openSignInDialog(Session.isBlocked() ? `Faction notes are off: ${Session.failureMessage()}` : 'Set up faction sharing first.');
+                openSignInDialog(Session.isBlocked() ? `Faction notes are off: ${Session.failureMessage()}` : 'Sign in first.');
                 return;
             }
             Shared.refreshAndRender().then((ok) => {
                 if (ok) Notice.show(`Faction notes refreshed (${Object.keys(SharedStore.notes()).length}).`);
             });
         }));
-        GM_registerMenuCommand('Upload local notes to faction', guard('Upload', () => {
-            openUploadDialog().catch((err) => reportError('Upload', err));
-        }));
-        GM_registerMenuCommand('Trade log (editors)', guard('Trade log', () => {
-            openTradeLogDialog().catch((err) => reportError('Trade log', err));
-        }));
-        GM_registerMenuCommand('Sync armory now (editors)', guard('Armory sync', () => {
-            syncArmoryNow().catch((err) => reportError('Armory sync', err));
-        }));
-        GM_registerMenuCommand('Manage editors (admin)', guard('Manage editors', () => {
-            openEditorsDialog().catch((err) => reportError('Manage editors', err));
-        }));
-        GM_registerMenuCommand('Reload faction notes (fix stale data)', guard('Reload faction notes', () => {
-            SharedStore.clear();
-            Session.clear();
-            refreshAll();
-            Notice.show('Reloading faction notes from the server. Nothing was deleted.');
-            if (PageState.factionArmoryOpen) Shared.refreshAndRender();
-        }));
-        GM_registerMenuCommand('Export local notes (backup)', guard('Export', openExportDialog));
-        GM_registerMenuCommand('Import local notes (restore)', guard('Import', openImportDialog));
-        GM_registerMenuCommand('Clear all local notes', guard('Clear', openClearDialog));
+        ensureEditorMenu(guard);
+        GM_registerMenuCommand('Private notes…', guard('Private notes', openPrivateNotesTools));
     }
 
     /**

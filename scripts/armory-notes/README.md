@@ -43,23 +43,17 @@ Everything still works. The Faction Armory then uses your private notes, as in v
 - **Enter** in the label field or **Ctrl+Enter** anywhere saves. **Esc** cancels.
 - Clear both the label and the note, or click **Delete**, to remove it.
 - In the Faction Armory, only editors see the tag on items without a note. Everyone else sees existing notes read-only.
-- On the Items page, editors can edit or delete an existing faction note by clicking its pill. New faction notes are added in the Faction Armory (or with **Upload local notes to faction**), so nothing is shared by accident.
+- On the Items page, editors can edit or delete an existing faction note by clicking its pill. New faction notes are added in the Faction Armory (or with **Editor tools… > Upload local notes**), so nothing is shared by accident.
 
 ## Tampermonkey menu
 
 | Command | What it does |
 |---|---|
-| Sign in | Enter your Public API key, sign in or out, and choose whether tag icons show on items without notes |
-| How it works | Short guide to the pills, the filter bar and (for editors) trade logging |
+| Sign in | Enter your Public API key, sign in or out, choose whether tag icons show on items without notes, and **Reload faction notes** if they look out of date (deletes nothing) |
+| How it works | Short guide with a legend of the icons and pills (and an Editors tab for editors) |
 | Refresh faction notes | Fetch the latest faction notes now |
-| Upload local notes to faction | Editors only. Pick local notes to move to the faction. Items seen in the faction armory are pre-ticked. Uploaded notes are removed locally, and items that already have a faction note are skipped. |
-| Trade log (editors) | Recent trades logged with **Log This As Traded**, with Remove buttons for mistakes |
-| Sync armory now (editors) | Ask the server to read the whole faction armory now (it also does so every 6 hours, and about 15 minutes after a trade is logged) |
-| Manage editors (admin) | Notes admin only: add editors from a list of faction members, or remove them. Takes effect immediately. |
-| Reload faction notes (fix stale data) | Throw away this browser's copy of the faction notes and load them fresh from the server (signs in again). Deletes nothing. |
-| Export local notes (backup) | Downloads `torn-armory-notes-YYYY-MM-DD.json` |
-| Import local notes (restore) | Pick a backup, then **Merge** (newer note wins per item) or **Replace all** |
-| Clear all local notes | Deletes every local note (offers to export first) |
+| Editor tools… | Editors only. **Trade log** (logged trades, with Remove buttons), **Sync armory now** (read the whole armory now; it also runs every 6 hours and about 15 minutes after a trade is logged), **Upload local notes** (move private notes into faction notes; items seen in the armory are pre-ticked, items that already have a faction note are skipped), and for the notes admin **Manage editors** |
+| Private notes… | **Export backup** (`torn-armory-notes-YYYY-MM-DD.json`), **Import** (Merge: newer note wins per item, or Replace all), **Clear all** (offers to export first) |
 
 ## API usage
 
@@ -98,6 +92,7 @@ That is about **1 Torn API call per 12 hours**, and about **1.3 server requests 
 
 ## Changelog
 
+- **2.8.2**: Tampermonkey menu trimmed to five items: **Sign in**, **How it works**, **Refresh faction notes**, **Editor tools…** (editors only) and **Private notes…**. **Reload faction notes** moved into Sign in. **How it works** redesigned: wider, with a legend of the real icons and pills, and an Editors tab.
 - **Server update (no script change)**: view page Bonuses column sorts A→Z by bonus name (highest % first within the same bonus); **Sort by stat** gains **Bonus %**.
 - **2.8.1**: **Sign in** replaces Settings: the faction's server is built in, so the popup only asks for your API key, plus a switch to hide tag icons on items without notes (they then appear when you hover an item). The note editor can't get stuck on "Saving…" any more: Close always works, and after 20 seconds without a reply the form is released with an explanation. The editor shows "Saved ✓" when done, and **Undo** is offered for 10 seconds after saving or deleting a note. A one-time **How it works** guide (also in the Tampermonkey menu and behind **?** in the note editor).
 - **2.8.0**: Filter bar above the Faction Armory list (everyone). Editors: **Log This As Traded** is highlighted, with a count, when a trade holds faction items that aren't logged yet. Scripts older than the version the faction's server needs show an update notice with a link, at most once a day.
