@@ -98,6 +98,7 @@ That is about **1 Torn API call per 12 hours**, and about **1.3 server requests 
 
 ## Changelog
 
+- **Server update (no script change)**: view page Bonuses column sorts A→Z by bonus name (highest % first within the same bonus); **Sort by stat** gains **Bonus %**.
 - **2.8.1**: **Sign in** replaces Settings: the faction's server is built in, so the popup only asks for your API key, plus a switch to hide tag icons on items without notes (they then appear when you hover an item). The note editor can't get stuck on "Saving…" any more: Close always works, and after 20 seconds without a reply the form is released with an explanation. The editor shows "Saved ✓" when done, and **Undo** is offered for 10 seconds after saving or deleting a note. A one-time **How it works** guide (also in the Tampermonkey menu and behind **?** in the note editor).
 - **2.8.0**: Filter bar above the Faction Armory list (everyone). Editors: **Log This As Traded** is highlighted, with a count, when a trade holds faction items that aren't logged yet. Scripts older than the version the faction's server needs show an update notice with a link, at most once a day.
 - **2.7.0**: **Manage editors (admin)**: the notes admin (set once as `ADMIN_ID` on the server) adds and removes editors from the script, no Cloudflare visit needed. Editors on the Faction Armory get a warning when the armory sync failed or is more than 12 hours old. The server re-syncs the armory about 15 minutes after a trade is logged or removed. Needs migration `0006_editors.sql` and the `ADMIN_ID` variable.

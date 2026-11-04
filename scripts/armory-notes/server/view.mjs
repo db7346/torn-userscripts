@@ -224,7 +224,28 @@ tr.detail td{background:#0f141a;border-bottom:1px solid var(--line);padding:10px
     if (k === 'tradeAt') { td = el('td'); if (r.tradedTo) { var s = el('span', 'trade', 'Traded to ' + r.tradedTo); s.appendChild(el('span', 'when', tct(r.tradeAt))); td.appendChild(s); } return td; }
     return el('td');
   }
-  function sortVal(k, r) { return k === 'status' ? r.statusKind + r.status : r[k]; }
+  // Bonus text is "60% Assassinate, 20% Execute": pull out names and percentages.
+  function bonusParts(text) {
+    var out = [];
+    String(text || '').split(',').forEach(function (part) {
+      var m = /^\\s*(\\d+(?:\\.\\d+)?)%\\s*(.+?)\\s*$/.exec(part);
+      if (m) out.push({ pct: Number(m[1]), name: m[2].toLowerCase() });
+    });
+    return out;
+  }
+  function sortVal(k, r) {
+    if (k === 'status') return r.statusKind + r.status;
+    if (k === 'bonuses') {
+      // A-Z by the first bonus name, then highest % first within the same bonus.
+      var b = bonusParts(r.bonuses)[0];
+      return b ? b.name + '|' + String(100000 - Math.round(b.pct * 100)).padStart(6, '0') : '';
+    }
+    if (k === 'bonusPct') {
+      var ps = bonusParts(r.bonuses).map(function (x) { return x.pct; });
+      return ps.length ? Math.max.apply(null, ps) : '';
+    }
+    return r[k];
+  }
   function inTab(r) { return r.type === state.type; }
   function matches(r) {
     if (!inTab(r)) return false;
@@ -259,7 +280,7 @@ tr.detail td{background:#0f141a;border-bottom:1px solid var(--line);padding:10px
   function renderSortMenu() {
     var sel = $('sort'); sel.textContent = '';
     var none = el('option', '', 'Sort by stat…'); none.value = ''; sel.appendChild(none);
-    STATS[state.type].forEach(function (s) {
+    STATS[state.type].concat([['bonusPct', '', '', 'Bonus %']]).forEach(function (s) {
       var hi = el('option', '', s[3] + ' (high → low)'); hi.value = s[0] + ':-1'; sel.appendChild(hi);
       var lo = el('option', '', s[3] + ' (low → high)'); lo.value = s[0] + ':1'; sel.appendChild(lo);
     });
