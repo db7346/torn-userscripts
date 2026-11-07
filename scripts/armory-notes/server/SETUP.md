@@ -98,6 +98,7 @@ Some releases change the database. Run each new file in [`migrations/`](migratio
 | `0004_trade_log.sql` | 2.5.0 | Adds the trade log ("Log This As Traded") |
 | `0005_armory_sync.sql` | 2.6.0 | Adds armory status, "missing since", loans, and sync bookkeeping |
 | `0006_editors.sql` | 2.7.0 | Adds the editor list managed by the admin. Also add the `ADMIN_ID` variable (your player ID). An existing `EDITOR_IDS` list is copied in automatically the first time; after that `EDITOR_IDS` is unused and can be deleted. |
+| `0007_borrowed_sold.sql` | 2.9.0 | Adds borrowed items and sold / removed marks |
 
 New databases created from `schema.sql` already include every migration.
 
@@ -136,6 +137,11 @@ For separate tabs, use `&type=weapons` and `&type=armor` on the export link (one
 ### Logging trades
 
 Editors see a **Log This As Traded** checkbox in the "This trade expires…" bar on a trade. Ticking it logs that trade's bonus weapons and armor that are armory items or have a faction note: yours as "Traded to <them>", theirs (matched by stats) as "Traded to <you>". Other items are ignored. While an item you received is still out of the armory, its Status reads **Returned to <you> (not deposited)**; the next armory sync after you deposit it changes that to **In armory**. Untick it to remove the log.
+
+### Borrowed, sold and removed items
+
+- **Borrowed:** when someone lends items to the faction, an editor ticks **Borrowed from <lender>** in the trade's "This trade expires" bar. Items the server hasn't seen yet are matched by their stats when they reach the armory (within 7 days). One-off items: fill **Borrowed from** in the note editor. While borrowed items are in the armory their status is **In armory · Borrowed from X**; once they go back they are hidden (not "Missing"), and they come back with their label, note and owner.
+- **Sold / removed:** **Editor tools… > Missing items** lists items that left without a logged trade. Tick them and choose **Mark sold**, **Mark removed** or **Returned to owner**. If a sold or removed item ever comes back to the armory, its status returns to **In armory** by itself.
 
 To fix a mistake later, use **Tampermonkey menu > Editor tools… > Trade log**: it lists recent logged trades with a **Remove** button per item and per trade. The sheet itself is read-only (Google re-imports it), so make corrections there, not in the sheet.
 

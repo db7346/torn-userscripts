@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Armory Notes
 // @namespace    dadgum.torn.armorynotes
-// @version      2.8.3
+// @version      2.9.0
 // @description  Colored labels and notes on individual weapons and armor (keyed by armory ID). Private notes on the Items page; shared faction notes in the Faction Armory.
 // @author       DadGum
 // @license      MIT
@@ -49,6 +49,13 @@
  * Author: DadGum
  *
  * Changelog
+ *   2.9.0 (2026-11-07) Borrowed items: editors tick "Borrowed from <lender>"
+ *                      on the trade (or fill "Borrowed from" in the note
+ *                      editor); returned items are hidden instead of
+ *                      "Missing" and come back with their tags. Editor
+ *                      tools > Missing items: mark items sold, removed or
+ *                      returned to their owner, in bulk. Tooltips show
+ *                      "Borrowed from".
  *   2.8.3 (2026-11-04) API key disclosure brought up to date (no code change):
  *                      who runs the server, the view page link, and no more
  *                      Settings / server URL wording.
@@ -137,8 +144,9 @@
  *       On your faction's notes server (Cloudflare D1): faction notes and,
  *       for each change, the editor's Torn player ID and name; the faction
  *       armory's bonus weapons/armor (stats, bonuses, who they are loaned
- *       to), trades logged by editors, and the editor list (player ID,
- *       name, who added them). Your API key is NOT stored on the server.
+ *       to; who lent an item to the faction; sold / removed marks), trades
+ *       logged by editors, and the editor list (player ID, name, who added
+ *       them). Your API key is NOT stored on the server.
  *     Exception, notes admin only: the admin may store ONE Limited key of
  *       their own as a server secret (ARMORY_API_KEY). The server uses it
  *       every 6 hours, and about 15 minutes after an editor logs a trade, to
@@ -418,6 +426,8 @@
         own: `${PREFIX}-own`,
         logBox: `${PREFIX}-logbox`,
         logBoxNudge: `${PREFIX}-logbox--nudge`,
+        logWrap: `${PREFIX}-logwrap`,
+        borrowBox: `${PREFIX}-borrowbox`,
         filterBar: `${PREFIX}-filter`,
         rowHidden: `${PREFIX}-row--hidden`,
         logHost: `${PREFIX}-loghost`,
@@ -1275,6 +1285,30 @@
         _gen: 0,
         /** @type {Map<string, string|null>|null} fingerprint -> armory ID (null if ambiguous). */
         _fpIndex: null,
+        /** @type {Object<string, string>} armory ID -> lender (items borrowed by the faction). */
+        _borrowed: {},
+        /** Server's version of the borrowed list ('' = not loaded this page). */
+        _bv: '',
+
+        /**
+         * Who lent this item to the faction ('' if not borrowed).
+         * @param {string} id - Armory ID.
+         * @returns {string} Lender's name.
+         */
+        borrowedFrom(id) {
+            return Object.hasOwn(this._borrowed, id) ? this._borrowed[id] : '';
+        },
+
+        /**
+         * Update one item's lender locally after an editor changed it.
+         * @param {string} id - Armory ID.
+         * @param {string} from - Lender ('' = not borrowed).
+         * @returns {void}
+         */
+        setBorrowed(id, from) {
+            if (from) this._borrowed[id] = from;
+            else delete this._borrowed[id];
+        },
 
         /**
          * Load the cache for the configured server (discarded if for another server).
@@ -1305,6 +1339,8 @@
             this._inflight = null;
             this._fpIndex = null;
             this._notes = {};
+            this._borrowed = {};
+            this._bv = '';
             this._since = 0;
             this._fetchedAt = 0;
             this._serverUrl = serverUrl;
@@ -1444,11 +1480,13 @@
             const sinceBefore = this._since;
             const changed = [];
             for (let page = 0; page < CONFIG.SHARED_MAX_PAGES; page += 1) {
-                const data = await Server.request('GET', `/notes?since=${encodeURIComponent(String(this._since))}`);
+                const data = await Server.request('GET', `/notes?since=${encodeURIComponent(String(this._since))}&bv=${encodeURIComponent(this._bv)}`);
                 // The cache was cleared or the server changed while waiting: drop this result.
                 if (gen !== this._gen) return [];
                 if (!data || !Array.isArray(data.notes)) throw new ServerError('bad_response', 'Unexpected response from the notes server.');
                 changed.push(...this.apply(data.notes));
+                if (data.borrowed && typeof data.borrowed === 'object') this._borrowed = { ...data.borrowed };
+                if (typeof data.borrowVersion === 'string') this._bv = data.borrowVersion;
                 if (typeof data.canEdit === 'boolean') Session.setCanEdit(data.canEdit);
                 if (typeof data.isAdmin === 'boolean') Session.setIsAdmin(data.isAdmin);
                 if (data.sync && typeof data.sync === 'object') SyncHealth.update(data.sync);
@@ -2271,7 +2309,8 @@ ${colorRules}
 .${CLS.checkRow} input{margin:2px 0 0;flex:0 0 auto;}
 .${CLS.linkRow}{display:flex;gap:6px;}
 .${CLS.logHost}{position:relative !important;}
-.${CLS.logBox}{position:absolute;right:12px;top:50%;transform:translateY(-50%);z-index:5;display:flex;align-items:center;
+.${CLS.logWrap}{position:absolute;right:12px;top:50%;transform:translateY(-50%);z-index:5;display:flex;gap:6px;align-items:center;}
+.${CLS.logBox}{display:flex;align-items:center;
   gap:6px;font:bold 12px Arial,Helvetica,sans-serif;color:#e6e6e6;cursor:pointer;user-select:none;
   background:rgba(0,0,0,.35);border:1px solid #555;border-radius:4px;padding:3px 8px;}
 .${CLS.logBox} input{margin:0;cursor:pointer;}
@@ -2547,6 +2586,8 @@ ${colorRules}
                     tip.append(title);
                 }
                 if (note.text) tip.append(el('div', { cls: CLS.tipBody, text: note.text }));
+                const lender = src.kind === 'shared' ? SharedStore.borrowedFrom(id) : '';
+                if (lender) tip.append(el('div', { cls: CLS.tipBody, text: `Borrowed from ${lender}` }));
                 const action = editable ? 'click to edit' : 'read-only';
                 let meta;
                 if (src.kind === 'shared') {
@@ -2843,6 +2884,12 @@ ${colorRules}
             const textArea = el('textarea', { attrs: { maxlength: String(CONFIG.TEXT_MAX), placeholder: 'Notes about this item…' } });
             textArea.value = existing?.text ?? '';
             const counter = el('div', { cls: CLS.counter });
+            // Faction notes only: who lent this item to the faction (blank = ours).
+            const borrowedBefore = shared ? SharedStore.borrowedFrom(id) : '';
+            const borrowInput = shared
+                ? el('input', { attrs: { type: 'text', maxlength: '32', placeholder: 'Player name, if lent to the faction', autocomplete: 'off' } })
+                : null;
+            if (borrowInput) borrowInput.value = borrowedBefore;
             const updateCounter = () => {
                 counter.textContent = `${textArea.value.length}/${CONFIG.TEXT_MAX}`;
             };
@@ -2888,7 +2935,7 @@ ${colorRules}
              */
             const setBusy = (on, label = 'Saving…') => {
                 busy = on;
-                [deleteBtn, saveBtn, labelInput, textArea, ...swatches].forEach((x) => {
+                [deleteBtn, saveBtn, labelInput, textArea, borrowInput, ...swatches].forEach((x) => {
                     if (x) x.disabled = on;
                 });
                 saveBtn.textContent = on ? label : 'Save';
@@ -2996,6 +3043,11 @@ ${colorRules}
                     }
                     await src.save(id, fields);
                 }
+                const borrowedNow = borrowInput ? borrowInput.value.trim() : borrowedBefore;
+                if (borrowInput && borrowedNow !== borrowedBefore) {
+                    await Server.request('POST', '/items/borrowed', { body: { armoryId: id, from: borrowedNow } });
+                    SharedStore.setBorrowed(id, borrowedNow);
+                }
             }, 'Could not save note', 'Saving…', 'Saved ✓', () => {
                 const now = src.get(id);
                 if (!now && !before) return null; // nothing was saved (both fields empty on a new note)
@@ -3020,6 +3072,7 @@ ${colorRules}
                 datalist,
                 swatchWrap,
                 el('label', { cls: CLS.field }, [el('span', { text: 'Note' }), textArea, counter]),
+                borrowInput ? el('label', { cls: CLS.field }, [el('span', { text: 'Borrowed from (hidden while it is given back)' }), borrowInput]) : null,
                 statusLine,
                 el('div', { cls: CLS.actions }, [deleteBtn, el('span', { cls: CLS.spacer }), cancelBtn, saveBtn]),
             ]);
@@ -3379,6 +3432,8 @@ ${colorRules}
                     tipList([
                         'Tick **Log This As Traded** in the "This trade expires" bar to record the trade. It turns yellow when a trade has faction items that are not logged yet.',
                         'Made a mistake? Untick it, or use **Editor tools > Trade log** to remove an entry.',
+                        'Someone lending items to the faction? Tick **Borrowed from …** on their trade. When the items go back they are hidden instead of "Missing", and they keep their tags if they come back.',
+                        'Sold or gave something away? **Editor tools > Missing items** marks items sold, removed or returned to their owner, many at once.',
                     ]),
                     el('h4', { text: 'Notes' }),
                     tipList([
@@ -3584,6 +3639,8 @@ ${colorRules}
     const TradeLogBox = {
         /** @type {Map<string, boolean>} trade ID -> logged (this page load). */
         _state: new Map(),
+        /** @type {Map<string, boolean>} trade ID -> "Borrowed" ticked (this page load). */
+        _borrowState: new Map(),
 
         /**
          * Trade ID of the open trade.
@@ -3603,18 +3660,20 @@ ${colorRules}
          * @returns {void}
          */
         ensure(root) {
-            const existing = root.querySelector(`.${CLS.logBox}`);
+            const existing = root.querySelector(`.${CLS.logBox}:not(.${CLS.borrowBox})`);
+            const oldWrap = root.querySelector(`.${CLS.logWrap}`);
             const cont = root.querySelector(CONFIG.SEL.TRADE_CONT);
             const tradeId = cont ? this._tradeId(root) : '';
             if (!cont || !tradeId || !Shared.isActive() || !Shared.canEdit()) {
-                existing?.remove();
+                oldWrap?.remove();
                 return;
             }
             if (existing && existing.dataset.tradeId === tradeId) {
                 this._maybeCheck(root, existing); // items may have changed or finished loading
+                this._updateBorrow(root);
                 return;
             }
-            existing?.remove();
+            oldWrap?.remove();
             const bar = cont.previousElementSibling?.matches(CONFIG.SEL.TRADE_BAR) ? cont.previousElementSibling : null;
             if (!bar) return; // layout changed: no place for the box
             bar.classList.add(CLS.logHost);
@@ -3627,8 +3686,92 @@ ${colorRules}
             input.addEventListener('change', () => {
                 this._toggle(root, tradeId, input, box).catch((err) => reportError('Trade log', err));
             });
-            bar.append(box);
+            const bInput = /** @type {HTMLInputElement} */ (el('input', { attrs: { type: 'checkbox' } }));
+            const bBox = el('label', {
+                cls: [CLS.logBox, CLS.borrowBox, CLS.own],
+                attrs: { title: 'Editors: the other person is lending these items to the faction. When they go back, they are hidden instead of "Missing", and keep their tags if they return.' },
+            }, [bInput, el('span', { text: 'Borrowed' })]);
+            bBox.dataset.tradeId = tradeId;
+            bBox.hidden = true;
+            bBox.addEventListener('click', (e) => e.stopPropagation());
+            bInput.addEventListener('change', () => {
+                this._toggleBorrow(root, tradeId, bInput, bBox).catch((err) => reportError('Borrowed items', err));
+            });
+            bar.append(el('div', { cls: [CLS.logWrap, CLS.own] }, [bBox, box]));
             this._loadState(root, tradeId, input, box);
+        },
+
+        /**
+         * The other person's bonus weapons/armor in this trade (by stats), for "Borrowed".
+         * @param {Element} root - Trade container.
+         * @returns {{fingerprint: string}[]} Items.
+         */
+        _lenderItems(root) {
+            const out = [];
+            root.querySelectorAll(CONFIG.SEL.TRADE_VIEW_ROW).forEach((row) => {
+                if (row.querySelector(CONFIG.SEL.TRADE_VIEW_REMOVE)) return; // your own side
+                const { fp, bonuses } = rowItemInfo(row, TRADE_PARTNER_ADAPTER);
+                if (fp && bonuses) out.push({ fingerprint: fp });
+            });
+            return out;
+        },
+
+        /**
+         * Show the "Borrowed from <lender>" box when the other person offers
+         * bonus weapons/armor (or it is already ticked).
+         * @param {Element} root - Trade container.
+         * @returns {void}
+         */
+        _updateBorrow(root) {
+            const bBox = root.querySelector(`.${CLS.borrowBox}`);
+            if (!bBox) return;
+            const input = bBox.querySelector('input');
+            const partner = ownText(root.querySelector(CONFIG.SEL.TRADE_PARTNER_NAME));
+            const n = this._lenderItems(root).length;
+            const text = bBox.querySelector('span');
+            const label = partner ? `Borrowed from ${partner}` : 'Borrowed';
+            if (text && text.textContent !== label) text.textContent = label;
+            bBox.hidden = !(n > 0 || input?.checked);
+        },
+
+        /**
+         * Mark (or unmark) the other person's bonus items as borrowed from them.
+         * @param {Element} root - Trade container.
+         * @param {string} tradeId - Trade ID.
+         * @param {HTMLInputElement} input - Checkbox.
+         * @param {HTMLElement} box - Label.
+         * @returns {Promise<void>}
+         */
+        async _toggleBorrow(root, tradeId, input, box) {
+            const want = input.checked;
+            this._busy(box, input, true);
+            try {
+                if (want) {
+                    const partner = ownText(root.querySelector(CONFIG.SEL.TRADE_PARTNER_NAME));
+                    if (!partner) throw new Error('Could not read the other player\'s name from this trade.');
+                    const items = this._lenderItems(root);
+                    if (!items.length) {
+                        input.checked = false;
+                        Notice.show(`${partner} isn't offering any bonus weapons or armor in this trade.`);
+                        return;
+                    }
+                    const data = await Server.request('POST', `/trades/${tradeId}/borrow`, { body: { from: partner, items } });
+                    const total = (data?.marked ?? 0) + (data?.pending ?? 0);
+                    Notice.show(`Marked ${total} item${total === 1 ? '' : 's'} as borrowed from ${partner}.`
+                        + (data?.pending ? ' New items are matched when they reach the armory.' : ''));
+                } else {
+                    await Server.request('POST', `/trades/${tradeId}/borrow`, { body: { from: '' } });
+                    Notice.show('Borrowed marks removed for this trade.');
+                }
+                this._borrowState.set(tradeId, input.checked);
+                Shared.refreshAndRender();
+            } catch (err) {
+                input.checked = !want;
+                handleSharedError('Borrowed items', err);
+            } finally {
+                this._busy(box, input, false);
+                this._updateBorrow(root);
+            }
         },
 
         /**
@@ -3642,6 +3785,9 @@ ${colorRules}
         _loadState(root, tradeId, input, box) {
             if (this._state.has(tradeId)) {
                 input.checked = this._state.get(tradeId);
+                const bInput = root.querySelector(`.${CLS.borrowBox} input`);
+                if (bInput) bInput.checked = this._borrowState.get(tradeId) === true;
+                this._updateBorrow(root);
                 this._maybeCheck(root, box);
                 return;
             }
@@ -3650,6 +3796,10 @@ ${colorRules}
                 .then((data) => {
                     this._state.set(tradeId, data?.logged === true);
                     input.checked = data?.logged === true;
+                    this._borrowState.set(tradeId, data?.borrowed === true);
+                    const bInput = root.querySelector(`.${CLS.borrowBox} input`);
+                    if (bInput) bInput.checked = data?.borrowed === true;
+                    this._updateBorrow(root);
                 })
                 .catch((err) => handleSharedError('Trade log', err, { quiet: true }))
                 .finally(() => {
@@ -4714,6 +4864,104 @@ ${colorRules}
     }
 
     /**
+     * One row of the Missing items list (pure).
+     * @param {{item: string, label: string, bonuses: string, missingSince: (number|null)}} m - Item.
+     * @returns {string} e.g. "9mm Uzi · War · 16% Powerful · missing 3 days ago".
+     */
+    function missingRowText(m) {
+        return [m.item || 'Unknown item', m.label, m.bonuses, m.missingSince ? `missing ${Data.relativeTime(m.missingSince, Date.now())}` : '']
+            .filter(Boolean).join(' · ');
+    }
+
+    /**
+     * Editor tools > Missing items: tick items that left the armory without a
+     * logged trade and mark them sold, removed, or returned to their owner
+     * (borrowed items, then hidden until they come back).
+     * @returns {Promise<void>}
+     */
+    async function openMissingItemsDialog() {
+        if (!Shared.isActive() || !Shared.canEdit()) {
+            Notice.show('Missing items is only for faction note editors.');
+            return;
+        }
+        let items;
+        try {
+            items = (await Server.request('GET', '/items/missing'))?.items ?? [];
+        } catch (err) {
+            handleSharedError('Missing items', err);
+            return;
+        }
+        const list = el('div', { cls: CLS.checklist });
+        const owner = el('input', { attrs: { type: 'text', maxlength: '32', placeholder: "Owner's name", autocomplete: 'off' } });
+        const status = el('div', { cls: CLS.status });
+        /** @type {HTMLInputElement[]} */
+        let boxes = [];
+        const render = () => {
+            boxes = [];
+            list.replaceChildren(...items.map((m) => {
+                const cb = /** @type {HTMLInputElement} */ (el('input', { attrs: { type: 'checkbox' } }));
+                cb.dataset.id = m.armoryId;
+                boxes.push(cb);
+                return el('label', { cls: CLS.checkRow }, [cb, el('span', { text: missingRowText(m) })]);
+            }));
+            if (!items.length) list.append(el('div', { cls: CLS.dim, text: 'Nothing is missing. 🎉' }));
+            status.textContent = items.length ? `${items.length} missing item${items.length === 1 ? '' : 's'}.` : '';
+        };
+        const selected = () => boxes.filter((b) => b.checked).map((b) => b.dataset.id);
+        /**
+         * Apply an action to the ticked items, then reload the list.
+         * @param {'sold'|'removed'|'returned'} action - What happened to them.
+         * @returns {Promise<void>}
+         */
+        const mark = async (action) => {
+            const ids = selected();
+            if (!ids.length) {
+                status.textContent = 'Tick at least one item first.';
+                return;
+            }
+            const body = { ids, action };
+            if (action === 'returned') {
+                body.owner = owner.value.trim();
+                if (!body.owner) {
+                    status.textContent = "Enter the owner's name first.";
+                    owner.focus();
+                    return;
+                }
+            }
+            try {
+                const res = await Server.request('POST', '/items/mark', { body });
+                const n = res?.updated ?? ids.length;
+                const what = { sold: 'sold', removed: 'removed', returned: `returned to ${body.owner}` }[action];
+                Notice.show(`Marked ${n} item${n === 1 ? '' : 's'} as ${what}.`);
+                items = (await Server.request('GET', '/items/missing'))?.items ?? [];
+                render();
+            } catch (err) {
+                handleSharedError('Missing items', err);
+            }
+        };
+        const selectAll = el('button', { cls: CLS.uiBtn, text: 'Select all', attrs: { type: 'button' } });
+        selectAll.addEventListener('click', () => {
+            const all = boxes.length > 0 && boxes.every((b) => b.checked);
+            boxes.forEach((b) => { b.checked = !all; });
+        });
+        render();
+        Modal.open({
+            title: 'Missing items',
+            message: 'Items that left the armory without a logged trade. Tick them and say what happened. '
+                + 'Sold or removed items stay listed with that status; items returned to their owner are hidden until they come back.',
+            content: [el('div', { cls: CLS.inlineRow }, [selectAll]), list,
+                el('label', { cls: CLS.field }, [el('span', { text: 'Owner (only for Returned to owner)' }), owner]), status],
+            actions: [
+                { label: 'Mark sold', onClick: () => mark('sold') },
+                { label: 'Mark removed', onClick: () => mark('removed') },
+                { label: 'Returned to owner', onClick: () => mark('returned') },
+                { label: 'Close', variant: 'primary', onClick: () => Modal.close() },
+            ],
+            wide: true,
+        });
+    }
+
+    /**
      * A panel of buttons, each with a one-line description (used for the
      * grouped Tampermonkey menu items).
      * @param {string} title - Dialog title.
@@ -4751,6 +4999,7 @@ ${colorRules}
         const tools = [
             { label: 'Trade log', help: 'Trades logged with "Log This As Traded"; remove mistakes.', run: openTradeLogDialog },
             { label: 'Sync armory now', help: 'Read the whole faction armory now (it also runs every 6 hours).', run: syncArmoryNow },
+            { label: 'Missing items', help: 'Mark items that left the armory as sold, removed or returned to their owner.', run: openMissingItemsDialog },
             { label: 'Upload local notes', help: 'Move your private notes into faction notes.', run: openUploadDialog },
         ];
         if (Session.peek()?.isAdmin) {

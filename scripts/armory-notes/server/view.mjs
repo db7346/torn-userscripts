@@ -106,7 +106,8 @@ td.note{max-width:320px;white-space:pre-wrap;word-break:break-word}
 .tab .n{font-weight:400;font-size:12px;opacity:.8;margin-left:4px}
 .st{display:inline-block;padding:1px 8px;border-radius:9px;font-size:12px;font-weight:700;white-space:nowrap}
 .st-in{background:#123321;color:var(--green2)}.st-traded{background:#1b2f4a;color:var(--blue)}
-.st-missing{background:#4a1515;color:#ff9b94}.st-returned{background:#3a3212;color:#e3b341}.st-out{background:#3d2912;color:var(--amber);font-style:italic}
+.st-missing{background:#4a1515;color:#ff9b94}.st-returned{background:#3a3212;color:#e3b341}
+.st-borrowed{background:#2a1d40;color:var(--purple)}.st-sold,.st-removed{background:#262a30;color:var(--dim)}.st-out{background:#3d2912;color:var(--amber);font-style:italic}
 .loan{color:var(--dim);white-space:nowrap}
 .warn{color:#ff9b94}
 .when{display:block;color:var(--dim);font-size:11px;font-weight:400}
@@ -130,7 +131,7 @@ tr.detail td{background:#0f141a;border-bottom:1px solid var(--line);padding:10px
   <input id="q" type="search" placeholder="Search item, label, note, bonus…" aria-label="Search">
   <select id="sort" aria-label="Sort by stat"></select>
   <select id="cat" aria-label="Category"><option value="">All categories</option><option>Primary</option><option>Secondary</option><option>Melee</option></select>
-  <select id="src" aria-label="Status"><option value="">Any status</option><option value="in">In armory</option><option value="loaned">Loaned out</option><option value="traded">Traded</option><option value="returned">Returned, not deposited</option><option value="missing">Missing</option><option value="out">Not in armory</option></select>
+  <select id="src" aria-label="Status"><option value="">Any status</option><option value="in">In armory</option><option value="borrowed">Borrowed</option><option value="loaned">Loaned out</option><option value="traded">Traded</option><option value="returned">Returned, not deposited</option><option value="missing">Missing</option><option value="sold">Sold / removed</option><option value="out">Not in armory</option></select>
   <label><input id="lab" type="checkbox"> Labeled only</label>
   <label><input id="trd" type="checkbox"> Traded only</label>
   <button type="button" class="btn" id="reset-cols" title="Put the columns back in their default order">Reset columns</button>
@@ -251,7 +252,10 @@ tr.detail td{background:#0f141a;border-bottom:1px solid var(--line);padding:10px
     if (!inTab(r)) return false;
     var q = $('q').value.trim().toLowerCase(), st = $('src').value;
     if (state.type === 'weapons' && $('cat').value && r.category !== $('cat').value) return false;
-    if (st === 'loaned' ? !r.loanedTo : st && r.statusKind !== st) return false;
+    if (st === 'loaned' ? !r.loanedTo
+      : st === 'sold' ? (r.statusKind !== 'sold' && r.statusKind !== 'removed')
+        : st === 'in' ? (r.statusKind !== 'in' && r.statusKind !== 'borrowed') // borrowed items are in the armory too
+        : st && r.statusKind !== st) return false;
     if ($('lab').checked && !r.label) return false;
     if ($('trd').checked && !r.tradedTo) return false;
     if (!q) return true;

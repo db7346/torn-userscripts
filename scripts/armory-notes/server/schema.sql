@@ -56,7 +56,23 @@ CREATE TABLE IF NOT EXISTS tracked_items (
     in_armory    INTEGER NOT NULL DEFAULT 1,       -- 0 once the armory sync no longer finds it
     missing_since INTEGER,                          -- epoch ms it was first found gone
     loaned_to    TEXT    NOT NULL DEFAULT '',      -- from the armory sync
-    loaned_to_id INTEGER NOT NULL DEFAULT 0
+    loaned_to_id INTEGER NOT NULL DEFAULT 0,
+    borrowed_from     TEXT NOT NULL DEFAULT '',    -- lent to the faction by this player; hidden while gone
+    borrowed_at       INTEGER,
+    borrowed_by_name  TEXT NOT NULL DEFAULT '',
+    borrowed_trade_id TEXT NOT NULL DEFAULT '',    -- trade the "Borrowed from" box was ticked on
+    disposition       TEXT NOT NULL DEFAULT '',    -- '' | 'sold' | 'removed' (cleared when it reappears)
+    disposition_at    INTEGER,
+    disposition_by_name TEXT NOT NULL DEFAULT ''
+);
+
+-- Borrowed marks for items not seen in the armory yet (matched by stats when they arrive).
+CREATE TABLE IF NOT EXISTS borrow_pending (
+    fingerprint      TEXT PRIMARY KEY,
+    borrowed_from    TEXT NOT NULL,
+    borrowed_by_name TEXT NOT NULL DEFAULT '',
+    trade_id         TEXT NOT NULL DEFAULT '',
+    created_at       INTEGER NOT NULL
 );
 
 -- Trades logged by editors ("Log This As Traded" on the trade page).

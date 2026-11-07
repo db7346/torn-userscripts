@@ -8,7 +8,8 @@ import { viewHtml } from './view.mjs';
  *                                           minScriptVersion }
  *   GET    /notes?since=<ms>     faction members: notes changed at/after <ms> (0 = all live notes);
  *                                editors also get { sync } (armory sync health); everyone gets
- *                                minScriptVersion (older scripts tell the member to update)
+ *                                minScriptVersion (older scripts tell the member to update) and,
+ *                                when ?bv= differs from borrowVersion, { borrowed: {armoryId: name} }
  *   PUT    /notes/:armoryId      editors: create/update one note
  *   DELETE /notes/:armoryId      editors: delete one note
  *   POST   /notes/import         editors: bulk upload { notes: [...] } (never overwrites)
@@ -22,6 +23,12 @@ import { viewHtml } from './view.mjs';
  *   POST   /trades/:tradeId      editors: log a trade { from, to, items: [{ armoryId or
  *                                fingerprint, itemName, direction: 'out'|'in' }] }
  *                                (replaces earlier log; fingerprints are matched here)
+ *   POST   /trades/:tradeId/borrow editors: { from, items } mark the lender's items in this trade as
+ *                                borrowed from `from` (items not seen yet are matched by stats when
+ *                                they reach the armory); { from: '' } undoes it
+ *   POST   /items/borrowed       editors: { armoryId, from } set or clear "Borrowed from" on one item
+ *   POST   /items/mark           editors: { ids, action: sold|removed|returned|clear, owner? }
+ *   GET    /items/missing        editors: items currently "Missing" (for the Missing items panel)
  *   POST   /trades/:tradeId/check editors: which of { items } would be logged (read-only;
  *                                drives the "log this trade?" reminder)
  *   DELETE /trades/:tradeId[/:armoryId]  editors: remove a trade's log (or one item)
@@ -105,7 +112,13 @@ const CONFIG = Object.freeze({
     MEMBERS_TTL_MS: 12 * 60 * 60 * 1000,
     MAX_EDITORS: 200,
     /** Scripts older than this tell the member (once a day) to update. Raise it when a server change needs a newer script. */
-    MIN_SCRIPT_VERSION: '2.8.0',
+    MIN_SCRIPT_VERSION: '2.9.0',
+    /** A "Borrowed from" mark for an item not seen yet is kept this long. */
+    BORROW_PENDING_MS: 7 * 24 * 60 * 60 * 1000,
+    /** Most items per "Mark sold / removed / returned" request. */
+    MAX_MARK: 500,
+    /** Longest lender name stored. */
+    OWNER_MAX: 32,
     /** A trade logged up to this long before an item disappeared counts as the reason it left. */
     TRADE_GRACE_MS: 7 * 24 * 60 * 60 * 1000,
     /** Without the sync: an item counts as missing once other items of its type were seen this much later. */
@@ -525,8 +538,18 @@ async function handleList(request, url, env, cfg) {
         ? 'SELECT * FROM notes WHERE deleted = 0 ORDER BY changed_at LIMIT ?2'
         : 'SELECT * FROM notes WHERE changed_at >= ?1 ORDER BY changed_at LIMIT ?2';
     const { results } = await cfg.db.prepare(sql).bind(since, CONFIG.MAX_RESULTS).all();
+    // Borrowed items (for "Borrowed from" in tooltips and the editor): only sent when changed.
+    const ver = await cfg.db.prepare("SELECT v FROM sync_state WHERE k = 'borrow_ver'").first();
+    const borrowVersion = String(ver?.v ?? '0');
+    let borrowed;
+    if (url.searchParams.get('bv') !== borrowVersion) {
+        const { results: b } = await cfg.db.prepare("SELECT armory_id, borrowed_from FROM tracked_items WHERE borrowed_from <> ''").all();
+        borrowed = Object.fromEntries((b ?? []).map((r) => [r.armory_id, r.borrowed_from]));
+    }
     return json(request, 200, {
         serverTime: Date.now(),
+        borrowVersion,
+        ...(borrowed ? { borrowed } : {}),
         canEdit,
         isAdmin: cfg.adminId !== 0 && user.pid === cfg.adminId,
         minScriptVersion: CONFIG.MIN_SCRIPT_VERSION,
@@ -777,8 +800,9 @@ async function handleItemsSeen(request, cfg) {
                fingerprint = CASE WHEN excluded.fingerprint <> '' THEN excluded.fingerprint ELSE tracked_items.fingerprint END,
                bonuses = excluded.bonuses, last_seen = excluded.last_seen,
                seen_by_id = excluded.seen_by_id, seen_by_name = excluded.seen_by_name,
-               in_armory = 1, missing_since = NULL`,
+               in_armory = 1, missing_since = NULL, disposition = ''`,
         ).bind(JSON.stringify(rows), now, user.pid, user.name).run();
+        await applyBorrowPending(cfg.db, now);
     }
     return json(request, 200, { recorded: rows.length });
 }
@@ -853,14 +877,18 @@ function tradeRow(r) {
  * @param {Request} request - Request.
  * @param {string} rawId - Trade ID.
  * @param {ReturnType<typeof settings>} cfg - Settings.
- * @returns {Promise<Response>} { logged, items }.
+ * @returns {Promise<Response>} { logged, borrowed, items }.
  */
 async function handleTradeGet(request, rawId, cfg) {
     const user = await requireUser(request, cfg);
     await requireEditor(user, cfg);
     const id = tradeId(rawId);
     const { results } = await cfg.db.prepare('SELECT * FROM trade_log WHERE trade_id = ?1 ORDER BY id').bind(id).all();
-    return json(request, 200, { logged: (results ?? []).length > 0, items: (results ?? []).map(tradeRow) });
+    const b = await cfg.db.prepare(
+        `SELECT (SELECT COUNT(*) FROM tracked_items WHERE borrowed_trade_id = ?1)
+              + (SELECT COUNT(*) FROM borrow_pending WHERE trade_id = ?1) AS n`,
+    ).bind(id).first();
+    return json(request, 200, { logged: (results ?? []).length > 0, borrowed: Number(b?.n) > 0, items: (results ?? []).map(tradeRow) });
 }
 
 /**
@@ -960,6 +988,191 @@ async function handleTradeCheck(request, rawId, cfg) {
     const items = [...wanted.entries()]
         .filter(([aid]) => eligible.has(aid))
         .map(([aid, w]) => ({ armoryId: aid, itemName: eligible.get(aid) || w.name }));
+    return json(request, 200, { items });
+}
+
+/* ---- Borrowed items and sold / removed marks ----------------------------- */
+
+/**
+ * Tidy a lender's name.
+ * @param {unknown} raw - Candidate.
+ * @returns {string} Name ('' if empty).
+ */
+function cleanOwner(raw) {
+    return String(raw ?? '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, CONFIG.OWNER_MAX);
+}
+
+/**
+ * Record that the borrowed list changed (scripts reload it on their next poll).
+ * @param {any} db - D1 binding.
+ * @returns {Promise<void>}
+ */
+async function bumpBorrowVersion(db) {
+    await writeSyncState(db, { borrow_ver: Date.now() });
+}
+
+/**
+ * Apply "Borrowed from" marks waiting for items that have now reached the
+ * armory (matched by stats), and drop expired ones. One cheap query when
+ * nothing is waiting.
+ * @param {any} db - D1 binding.
+ * @param {number} now - Epoch ms.
+ * @returns {Promise<number>} Items marked.
+ */
+async function applyBorrowPending(db, now) {
+    const waiting = await db.prepare('SELECT COUNT(*) AS n FROM borrow_pending').first();
+    if (!Number(waiting?.n)) return 0;
+    const cutoff = now - CONFIG.BORROW_PENDING_MS;
+    const [upd] = await db.batch([
+        db.prepare(
+            `UPDATE tracked_items SET borrowed_from = p.borrowed_from, borrowed_at = p.created_at,
+                    borrowed_by_name = p.borrowed_by_name, borrowed_trade_id = p.trade_id
+             FROM borrow_pending AS p
+             WHERE tracked_items.fingerprint = p.fingerprint AND tracked_items.fingerprint <> ''
+               AND tracked_items.in_armory = 1 AND p.created_at >= ?1`,
+        ).bind(cutoff),
+        db.prepare(
+            `DELETE FROM borrow_pending WHERE created_at < ?1
+               OR fingerprint IN (SELECT fingerprint FROM tracked_items WHERE in_armory = 1 AND borrowed_from <> '')`,
+        ).bind(cutoff),
+    ]);
+    const n = Number(upd?.meta?.changes) || 0;
+    if (n) await bumpBorrowVersion(db);
+    return n;
+}
+
+/**
+ * POST /trades/:tradeId/borrow - mark the lender's items in this trade as
+ * borrowed (or undo it with from: ''). Items already known are marked now;
+ * the rest are matched by stats when they reach the armory (within 7 days).
+ * @param {Request} request - Request.
+ * @param {string} rawId - Trade ID.
+ * @param {ReturnType<typeof settings>} cfg - Settings.
+ * @returns {Promise<Response>} { marked, pending } or { cleared }.
+ */
+async function handleTradeBorrow(request, rawId, cfg) {
+    const user = await requireUser(request, cfg);
+    await requireEditor(user, cfg);
+    const id = tradeId(rawId);
+    const body = await readJson(request);
+    const from = cleanOwner(body?.from);
+    if (!from) {
+        const [a, b] = await cfg.db.batch([
+            cfg.db.prepare(
+                `UPDATE tracked_items SET borrowed_from = '', borrowed_at = NULL, borrowed_by_name = '', borrowed_trade_id = ''
+                 WHERE borrowed_trade_id = ?1`,
+            ).bind(id),
+            cfg.db.prepare('DELETE FROM borrow_pending WHERE trade_id = ?1').bind(id),
+        ]);
+        await bumpBorrowVersion(cfg.db);
+        return json(request, 200, { cleared: (Number(a?.meta?.changes) || 0) + (Number(b?.meta?.changes) || 0) });
+    }
+    const list = Array.isArray(body?.items) ? body.items.slice(0, CONFIG.MAX_TRADE_ITEMS) : [];
+    const known = [];
+    const pending = [];
+    for (const it of list) {
+        const fp = cleanFingerprint(it?.fingerprint);
+        if (!fp) continue;
+        // Only armory items can carry the mark; anything else waits until it reaches the armory.
+        const { results } = await cfg.db.prepare('SELECT armory_id FROM tracked_items WHERE fingerprint = ?1 LIMIT 2').bind(fp).all();
+        if ((results ?? []).length === 1) known.push(results[0].armory_id);
+        else if (!pending.includes(fp)) pending.push(fp);
+    }
+    const now = Date.now();
+    await cfg.db.batch([
+        cfg.db.prepare(
+            `UPDATE tracked_items SET borrowed_from = ?2, borrowed_at = ?3, borrowed_by_name = ?4, borrowed_trade_id = ?5
+             WHERE armory_id IN (SELECT value FROM json_each(?1))`,
+        ).bind(JSON.stringify(known), from, now, user.name, id),
+        cfg.db.prepare(
+            `INSERT INTO borrow_pending (fingerprint, borrowed_from, borrowed_by_name, trade_id, created_at)
+             SELECT value, ?2, ?3, ?4, ?5 FROM json_each(?1) WHERE true
+             ON CONFLICT(fingerprint) DO UPDATE SET borrowed_from = excluded.borrowed_from,
+               borrowed_by_name = excluded.borrowed_by_name, trade_id = excluded.trade_id, created_at = excluded.created_at`,
+        ).bind(JSON.stringify(pending), from, user.name, id, now),
+    ]);
+    await bumpBorrowVersion(cfg.db);
+    return json(request, 200, { marked: known.length, pending: pending.length });
+}
+
+/**
+ * POST /items/borrowed - set or clear "Borrowed from" on one armory item.
+ * @param {Request} request - Request.
+ * @param {ReturnType<typeof settings>} cfg - Settings.
+ * @returns {Promise<Response>} { armoryId, borrowedFrom }.
+ */
+async function handleItemBorrowed(request, cfg) {
+    const user = await requireUser(request, cfg);
+    await requireEditor(user, cfg);
+    const body = await readJson(request);
+    const id = armoryId(body?.armoryId);
+    const from = cleanOwner(body?.from);
+    const res = await cfg.db.prepare(
+        `UPDATE tracked_items SET borrowed_from = ?2, borrowed_at = ?3, borrowed_by_name = ?4, borrowed_trade_id = ''
+         WHERE armory_id = ?1`,
+    ).bind(id, from, from ? Date.now() : null, from ? user.name : '').run();
+    if (!Number(res?.meta?.changes)) {
+        throw new HttpError(404, 'not_tracked', 'Only bonus weapons and armor seen in the faction armory can be marked as borrowed.');
+    }
+    await bumpBorrowVersion(cfg.db);
+    return json(request, 200, { armoryId: id, borrowedFrom: from });
+}
+
+/**
+ * POST /items/mark - mark items sold or removed, returned to their owner
+ * (treated as borrowed, so hidden while gone), or clear a sold/removed mark.
+ * @param {Request} request - Request.
+ * @param {ReturnType<typeof settings>} cfg - Settings.
+ * @returns {Promise<Response>} { updated }.
+ */
+async function handleItemsMark(request, cfg) {
+    const user = await requireUser(request, cfg);
+    await requireEditor(user, cfg);
+    const body = await readJson(request);
+    const ids = [...new Set((Array.isArray(body?.ids) ? body.ids : []).map(String).filter((x) => CONFIG.ARMORY_ID_PATTERN.test(x)))];
+    if (!ids.length) throw new HttpError(400, 'bad_items', 'No valid armory IDs.');
+    if (ids.length > CONFIG.MAX_MARK) throw new HttpError(413, 'too_many', `At most ${CONFIG.MAX_MARK} items at once.`);
+    const action = String(body?.action ?? '');
+    const now = Date.now();
+    let stmt;
+    if (action === 'sold' || action === 'removed') {
+        stmt = cfg.db.prepare(
+            `UPDATE tracked_items SET disposition = ?2, disposition_at = ?3, disposition_by_name = ?4
+             WHERE armory_id IN (SELECT value FROM json_each(?1))`,
+        ).bind(JSON.stringify(ids), action, now, user.name);
+    } else if (action === 'clear') {
+        stmt = cfg.db.prepare(
+            `UPDATE tracked_items SET disposition = '', disposition_at = NULL, disposition_by_name = ''
+             WHERE armory_id IN (SELECT value FROM json_each(?1))`,
+        ).bind(JSON.stringify(ids));
+    } else if (action === 'returned') {
+        const owner = cleanOwner(body?.owner);
+        if (!owner) throw new HttpError(400, 'no_owner', "Enter the owner's name.");
+        stmt = cfg.db.prepare(
+            `UPDATE tracked_items SET borrowed_from = ?2, borrowed_at = ?3, borrowed_by_name = ?4, borrowed_trade_id = ''
+             WHERE armory_id IN (SELECT value FROM json_each(?1))`,
+        ).bind(JSON.stringify(ids), owner, now, user.name);
+    } else {
+        throw new HttpError(400, 'bad_action', 'Unknown action.');
+    }
+    const res = await stmt.run();
+    if (action === 'returned') await bumpBorrowVersion(cfg.db);
+    return json(request, 200, { updated: Number(res?.meta?.changes) || 0 });
+}
+
+/**
+ * GET /items/missing - items whose status is "Missing since …", newest first.
+ * @param {Request} request - Request.
+ * @param {ReturnType<typeof settings>} cfg - Settings.
+ * @returns {Promise<Response>} { items: [{ armoryId, item, type, bonuses, label, missingSince }] }.
+ */
+async function handleItemsMissing(request, cfg) {
+    const user = await requireUser(request, cfg);
+    await requireEditor(user, cfg);
+    const items = (await sheetRows(cfg))
+        .filter((r) => r.statusKind === 'missing')
+        .sort((a, b) => (b.missingSince ?? 0) - (a.missingSince ?? 0))
+        .map((r) => ({ armoryId: r.armoryId, item: r.item, type: r.type, bonuses: r.bonuses, label: r.label, missingSince: r.missingSince }));
     return json(request, 200, { items });
 }
 
@@ -1117,9 +1330,17 @@ async function sheetRows(cfg) {
                     gone = true;
                     missingSince = item.last_seen;
                 }
-                if (!gone) {
+                if (gone && item.borrowed_from) return null; // borrowed and given back: hidden until it returns
+                if (!gone && item.borrowed_from) {
+                    status = `In armory · Borrowed from ${item.borrowed_from}`;
+                    statusKind = 'borrowed';
+                } else if (!gone) {
                     status = 'In armory';
                     statusKind = 'in';
+                } else if (item.disposition === 'sold' || item.disposition === 'removed') {
+                    const when = tct(item.disposition_at).slice(0, 10);
+                    status = `${item.disposition === 'sold' ? 'Sold' : 'Removed'} (${when}${item.disposition_by_name ? `, ${item.disposition_by_name}` : ''})`;
+                    statusKind = item.disposition;
                 } else if (trade && trade.logged_at >= (missingSince ?? 0) - CONFIG.TRADE_GRACE_MS) {
                     if (isIncomingTrade(trade)) {
                         // An editor logged receiving it: they hold it until they deposit it.
@@ -1140,7 +1361,8 @@ async function sheetRows(cfg) {
                 category: item?.category ? (CATEGORY_NAMES[item.category] ?? item.category) : '',
                 source: item ? 'Armory' : 'Not in armory',
                 status, statusKind, missingSince,
-                loanedTo: statusKind === 'in' ? (item?.loaned_to ?? '') : '',
+                loanedTo: statusKind === 'in' || statusKind === 'borrowed' ? (item?.loaned_to ?? '') : '',
+                borrowedFrom: item?.borrowed_from ?? '',
                 label: note?.label ?? '', note: note?.text ?? '', color: note?.color ?? '',
                 armoryId: id, damage: st.damage, accuracy: st.accuracy, defence: st.defence,
                 bonuses: item?.bonuses || note?.bonuses || '',
@@ -1150,6 +1372,7 @@ async function sheetRows(cfg) {
                 tradeAt: trade?.logged_at ?? null, tradeLoggedBy: trade?.logged_by_name ?? '',
             };
         })
+        .filter(Boolean)
         .sort((a, b) => Number(a.source !== 'Armory') - Number(b.source !== 'Armory')
             || a.item.localeCompare(b.item) || a.armoryId.localeCompare(b.armoryId));
 }
@@ -1420,7 +1643,7 @@ async function runArmorySync(env) {
         // Everything present: in the armory, with its current loan.
         const presentRows = uids.map((u) => ({ u, l: present.get(u).loaned?.name ?? '', li: present.get(u).loaned?.id ?? 0, c: present.get(u).type }));
         await cfg.db.prepare(
-            `UPDATE tracked_items SET in_armory = 1, missing_since = NULL, last_seen = ?2,
+            `UPDATE tracked_items SET in_armory = 1, missing_since = NULL, last_seen = ?2, disposition = '',
                     loaned_to = json_extract(j.value, '$.l'), loaned_to_id = json_extract(j.value, '$.li'),
                     category = CASE WHEN category = '' THEN json_extract(j.value, '$.c') ELSE category END
              FROM json_each(?1) AS j WHERE tracked_items.armory_id = json_extract(j.value, '$.u')`,
@@ -1430,8 +1653,9 @@ async function runArmorySync(env) {
             `UPDATE tracked_items SET in_armory = 0, missing_since = COALESCE(missing_since, ?2), loaned_to = '', loaned_to_id = 0
              WHERE in_armory = 1 AND armory_id NOT IN (SELECT value FROM json_each(?1))`,
         ).bind(JSON.stringify(uids), now).run();
+        const borrowedMatched = await applyBorrowPending(cfg.db, now);
         const summary = {
-            ok: true, at: now, inArmory: uids.length, newlyLookedUp: newRows.length,
+            ok: true, at: now, inArmory: uids.length, newlyLookedUp: newRows.length, borrowedMatched,
             newBonusItems: newRows.filter((r) => r.b).length, markedMissing: gone?.meta?.changes ?? null,
             remainingToLookUp: Math.max(0, uids.filter((u) => !knownSet.has(u)).length - fresh.length),
         };
@@ -1638,11 +1862,15 @@ export default {
             if (path === '/notes/import' && request.method === 'POST') return await handleImport(request, cfg);
             if (path === '/notes/fingerprints' && request.method === 'POST') return await handleFingerprints(request, cfg);
             if (path === '/items/seen' && request.method === 'POST') return await handleItemsSeen(request, cfg);
+            if (path === '/items/borrowed' && request.method === 'POST') return await handleItemBorrowed(request, cfg);
+            if (path === '/items/mark' && request.method === 'POST') return await handleItemsMark(request, cfg);
+            if (path === '/items/missing' && request.method === 'GET') return await handleItemsMissing(request, cfg);
             if (path === '/trades' && request.method === 'GET') return await handleTradeList(request, url, cfg);
             const t = path.match(/^\/trades\/([^/]+)(?:\/([^/]+))?$/);
             if (t && !t[2] && request.method === 'GET') return await handleTradeGet(request, t[1], cfg);
             if (t && !t[2] && request.method === 'POST') return await handleTradeLog(request, t[1], cfg);
             if (t && t[2] === 'check' && request.method === 'POST') return await handleTradeCheck(request, t[1], cfg);
+            if (t && t[2] === 'borrow' && request.method === 'POST') return await handleTradeBorrow(request, t[1], cfg);
             if (t && request.method === 'DELETE') return await handleTradeDelete(request, t[1], t[2], cfg);
             if (path === '/export.csv' && request.method === 'GET') return await handleExport(request, url, env, cfg);
             if (path === '/view' && request.method === 'GET') return await handleView(request, url, env, cfg);

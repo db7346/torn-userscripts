@@ -52,7 +52,7 @@ Everything still works. The Faction Armory then uses your private notes, as in v
 | Sign in | Enter your Public API key, sign in or out, choose whether tag icons show on items without notes, and **Reload faction notes** if they look out of date (deletes nothing) |
 | How it works | Short guide with a legend of the icons and pills (and an Editors tab for editors) |
 | Refresh faction notes | Fetch the latest faction notes now |
-| Editor tools… | Editors only. **Trade log** (logged trades, with Remove buttons), **Sync armory now** (read the whole armory now; it also runs every 6 hours and about 15 minutes after a trade is logged), **Upload local notes** (move private notes into faction notes; items seen in the armory are pre-ticked, items that already have a faction note are skipped), and for the notes admin **Manage editors** |
+| Editor tools… | Editors only. **Trade log** (logged trades, with Remove buttons), **Sync armory now** (read the whole armory now; it also runs every 6 hours and about 15 minutes after a trade is logged), **Missing items** (mark items that left the armory as sold, removed or returned to their owner, in bulk), **Upload local notes** (move private notes into faction notes; items seen in the armory are pre-ticked, items that already have a faction note are skipped), and for the notes admin **Manage editors** |
 | Private notes… | **Export backup** (`torn-armory-notes-YYYY-MM-DD.json`), **Import** (Merge: newer note wins per item, or Replace all), **Clear all** (offers to export first) |
 
 ## API usage
@@ -73,7 +73,7 @@ That is about **1 Torn API call per 12 hours**, and about **1.3 server requests 
 | | |
 |---|---|
 | Who runs the server | Your faction's notes admin, on their own Cloudflare account. Its address is built into the script. |
-| Data storage | **This browser:** your local notes, your API key, your display choice, a sign-in token and a cache of faction notes. **Faction server (Cloudflare D1):** faction notes with the Torn player ID and name of whoever changed each one, and a change history; the faction armory's bonus weapons and armor (stats, bonuses, who they're loaned to); trades logged by editors; and the editor list (player ID, name, who added them). **Your API key is not stored on the server.** |
+| Data storage | **This browser:** your local notes, your API key, your display choice, a sign-in token and a cache of faction notes. **Faction server (Cloudflare D1):** faction notes with the Torn player ID and name of whoever changed each one, and a change history; the faction armory's bonus weapons and armor (stats, bonuses, who they're loaned to, who lent them to the faction, sold / removed marks); trades logged by editors; and the editor list (player ID, name, who added them). **Your API key is not stored on the server.** |
 | Data sharing | Faction notes are visible to members of your faction who use this script, and to anyone the notes admin gives the view page link (a read-only web page of the armory list with notes, who items are loaned to, and who edited them). Nothing is shared with anyone else. |
 | Purpose of use | Annotating your own and your faction's items |
 | Key storage & sharing | Stored only in Tampermonkey storage. Sent over HTTPS, in the body of the sign-in request (about once every 12 hours), only to your faction's notes server. The server uses it for one Torn API call to confirm who you are and that you're in the faction, then forgets it. It is never stored, logged or put in a URL. |
@@ -93,6 +93,7 @@ That is about **1 Torn API call per 12 hours**, and about **1.3 server requests 
 
 ## Changelog
 
+- **2.9.0**: **Borrowed items:** editors tick **Borrowed from <lender>** on the lender's trade (or fill **Borrowed from** in the note editor). When the items go back they're hidden instead of "Missing", and they come back with their tags. **Editor tools… > Missing items** marks items **sold**, **removed** or **returned to owner**, many at once. Tooltips show "Borrowed from". The view page gets **Borrowed** and **Sold / removed** status filters. Needs migration `0007_borrowed_sold.sql`. Older scripts now see the update notice.
 - **2.8.3**: API key disclosure brought up to date: who runs the server, everything the server stores, the admin's Limited key, and the view page link. No change to how the script works.
 - **2.8.2**: Tampermonkey menu trimmed to five items: **Sign in**, **How it works**, **Refresh faction notes**, **Editor tools…** (editors only) and **Private notes…**. **Reload faction notes** moved into Sign in. **How it works** redesigned: wider, with a legend of the real icons and pills, and an Editors tab.
 - **Server update (no script change)**: view page Bonuses column sorts A→Z by bonus name (highest % first within the same bonus); **Sort by stat** gains **Bonus %**.
