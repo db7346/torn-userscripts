@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Armory Notes
 // @namespace    dadgum.torn.armorynotes
-// @version      2.9.0
+// @version      2.9.1
 // @description  Colored labels and notes on individual weapons and armor (keyed by armory ID). Private notes on the Items page; shared faction notes in the Faction Armory.
 // @author       DadGum
 // @license      MIT
@@ -49,6 +49,8 @@
  * Author: DadGum
  *
  * Changelog
+ *   2.9.1 (2026-11-07) Faction Armory > Deposit: faction notes show read-only
+ *                      on your items (same list layout as the trade screen).
  *   2.9.0 (2026-11-07) Borrowed items: editors tick "Borrowed from <lender>"
  *                      on the trade (or fill "Borrowed from" in the note
  *                      editor); returned items are hidden instead of
@@ -4395,6 +4397,14 @@ ${colorRules}
         ],
     };
 
+    /**
+     * Faction Armory > Deposit list: Torn renders it with the same component as
+     * the trade add-items screen (armory ID in data-reactid, same name box), so
+     * it reuses that adapter. Read-only faction notes, like on trades.
+     * @type {PageAdapter}
+     */
+    const DEPOSIT_ADAPTER = { ...TRADE_ADD_ADAPTER, name: 'faction-deposit' };
+
     /** Trade page, trade view: your own items only (theirs carry no armory ID). @type {PageAdapter} */
     const TRADE_VIEW_ADAPTER = {
         name: 'trade-view',
@@ -4821,6 +4831,7 @@ ${colorRules}
             const token = ++syncToken;
             if (!location.hash.includes(CONFIG.FACTION_HASH_TOKEN)) {
                 watcher.detach();
+                depositWatcher.detach();
                 PageState.factionArmoryOpen = false;
                 SharedSync.stop();
                 return;
@@ -4833,11 +4844,13 @@ ${colorRules}
                 return;
             }
             watcher.attach(root);
+            depositWatcher.attach(root);
             PageState.factionArmoryOpen = true;
             SharedSync.start();
             maybePromptSetup();
         };
         const watcher = new RootWatcher(FACTION_ADAPTER, () => sync());
+        const depositWatcher = new RootWatcher(DEPOSIT_ADAPTER);
         window.addEventListener('hashchange', () => {
             Editor.close(false);
             Tooltip.hide();

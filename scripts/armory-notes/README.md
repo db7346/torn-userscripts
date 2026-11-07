@@ -14,6 +14,7 @@ Attach a colored label and a note to individual weapons and armor. Notes are tie
 - The label shows as a colored pill; hover it to read the full note
 - **Faction Armory:** shared faction notes, refreshed every 45 seconds while the tab is visible. Hover shows who edited a note last and when. A **filter bar** above the list searches item names, labels and notes, or shows **Tagged only** / **Untagged bonus items** (on the page currently shown).
 - **Items page:** your private notes (row and thumbnail views), plus a faction pill (with a people icon) when an item has a faction note. Editors can click it to edit or delete the faction note, which is handy for items in your own inventory; everyone else sees it read-only.
+- **Faction Armory > Deposit:** faction notes show read-only on your items, so you can see what you're depositing.
 - **Trade pages:** faction notes show read-only on your own items, in the trade view, on the add-items screen and on its confirmation step, and on **the other person's items** in the trade view (matched by the item's stats), so you can see a faction-owned item before you send it
 - **Live spreadsheet** (optional, set up by the notes admin): every bonus weapon and armor piece in the Faction Armory, plus every faction note, with stats, bonuses, last edit, previous edit and last seen, in Google Sheets
 - Upload your existing local notes to the faction in one step
@@ -82,17 +83,17 @@ That is about **1 Torn API call per 12 hours**, and about **1.3 server requests 
 ## Known limitations
 
 - On the other person's side of a trade, Torn shows no item ID, so notes are matched by **stats**: name + damage + accuracy for weapons, name + defence + bonus for armor. An item is only matched after an editor has seen it with the script (in the armory, on their Items page or in their own trade) since its note was added. If two noted items have identical stats, neither is shown rather than guessing.
-- On the trade add-items screen, the item ID is read from an internal React attribute (`data-reactid`). If Torn updates its page framework, notes stop showing there until the script is updated; everything else keeps working.
+- On the trade add-items screen and the Deposit list, the item ID is read from an internal React attribute (`data-reactid`). If Torn updates its page framework, notes stop showing there until the script is updated; everything else keeps working.
 - On the Items page, faction notes show in row view only, not thumbnail view.
 - Edits are last-write-wins. If two editors change the same note at once, the later save wins; both changes are in the server's history.
 - Local notes are per browser. Use Export/Import to move them.
 - In the Faction Armory, a long item name truncates to make room for the label pill.
-- The faction Deposit list is not covered, because its markup has no armory IDs.
 - The armory filter only searches the page Torn is showing; items on other armory pages are not searched (use the view page for the whole armory).
 - Faction rows are classified by the text of the "Type" column. If Torn renames those values, buttons there disappear until the script is updated.
 
 ## Changelog
 
+- **2.9.1**: Faction Armory **Deposit** list shows faction notes (read-only) on your items.
 - **2.9.0**: **Borrowed items:** editors tick **Borrowed from <lender>** on the lender's trade (or fill **Borrowed from** in the note editor). When the items go back they're hidden instead of "Missing", and they come back with their tags. **Editor tools… > Missing items** marks items **sold**, **removed** or **returned to owner**, many at once. Tooltips show "Borrowed from". The view page gets **Borrowed** and **Sold / removed** status filters. Needs migration `0007_borrowed_sold.sql`. Older scripts now see the update notice.
 - **2.8.3**: API key disclosure brought up to date: who runs the server, everything the server stores, the admin's Limited key, and the view page link. No change to how the script works.
 - **2.8.2**: Tampermonkey menu trimmed to five items: **Sign in**, **How it works**, **Refresh faction notes**, **Editor tools…** (editors only) and **Private notes…**. **Reload faction notes** moved into Sign in. **How it works** redesigned: wider, with a legend of the real icons and pills, and an Editors tab.
