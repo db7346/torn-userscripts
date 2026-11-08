@@ -9,7 +9,8 @@ import { viewHtml } from './view.mjs';
  *   GET    /notes?since=<ms>     faction members: notes changed at/after <ms> (0 = all live notes);
  *                                editors also get { sync } (armory sync health); everyone gets
  *                                minScriptVersion (older scripts tell the member to update) and,
- *                                when ?bv= differs from borrowVersion, { borrowed: {armoryId: name} }
+ *                                when ?bv= differs from borrowVersion, { borrowed: {armoryId: name},
+ *                                borrowPending: {fingerprint: name} }
  *   PUT    /notes/:armoryId      editors: create/update one note
  *   DELETE /notes/:armoryId      editors: delete one note
  *   POST   /notes/import         editors: bulk upload { notes: [...] } (never overwrites)
@@ -567,14 +568,19 @@ async function handleList(request, url, env, cfg) {
     const ver = await cfg.db.prepare("SELECT v FROM sync_state WHERE k = 'borrow_ver'").first();
     const borrowVersion = String(ver?.v ?? '0');
     let borrowed;
+    let borrowPending;
     if (url.searchParams.get('bv') !== borrowVersion) {
         const { results: b } = await cfg.db.prepare("SELECT armory_id, borrowed_from FROM tracked_items WHERE borrowed_from <> ''").all();
         borrowed = Object.fromEntries((b ?? []).map((r) => [r.armory_id, r.borrowed_from]));
+        // Items ticked as borrowed that have not reached the armory yet (shown on the Deposit page).
+        const { results: p } = await cfg.db.prepare('SELECT fingerprint, borrowed_from FROM borrow_pending WHERE created_at >= ?1')
+            .bind(Date.now() - CONFIG.BORROW_PENDING_MS).all();
+        borrowPending = Object.fromEntries((p ?? []).map((r) => [r.fingerprint, r.borrowed_from]));
     }
     return json(request, 200, {
         serverTime: Date.now(),
         borrowVersion,
-        ...(borrowed ? { borrowed } : {}),
+        ...(borrowed ? { borrowed, borrowPending } : {}),
         canEdit,
         isAdmin: cfg.adminId !== 0 && user.pid === cfg.adminId,
         minScriptVersion: CONFIG.MIN_SCRIPT_VERSION,
@@ -1111,6 +1117,43 @@ async function bumpBorrowVersion(db) {
 }
 
 /**
+ * Statements that give newly borrowed armory items a purple faction label
+ * with the lender's name. Items with a live note are left alone (never
+ * overwritten); deleted notes are revived. Each new label is logged.
+ * @param {any} db - D1 binding.
+ * @param {string} source - SQL rows with columns armory_id, lender, by_name
+ *   (joined to tracked_items as t for the item name, ID, fingerprint and bonuses).
+ * @param {any[]} binds - Values for the placeholders in source; ?N for the
+ *   timestamp is passed as the last one.
+ * @param {number} nowIdx - Placeholder number of the timestamp.
+ * @returns {any[]} Prepared statements (log first, then the notes).
+ */
+function lenderLabelStmts(db, source, binds, nowIdx) {
+    const rows = `SELECT t.armory_id, substr(src.lender, 1, ${CONFIG.LABEL_MAX}) AS label, src.by_name,
+                         t.item_name, t.item_id, t.fingerprint, t.bonuses
+                  FROM (${source}) AS src JOIN tracked_items AS t ON t.armory_id = src.armory_id
+                  WHERE src.lender <> ''
+                    AND NOT EXISTS (SELECT 1 FROM notes n WHERE n.armory_id = t.armory_id AND n.deleted = 0)`;
+    return [
+        db.prepare(
+            `INSERT INTO note_log (armory_id, action, label, color, text, at, by_id, by_name)
+             SELECT armory_id, 'upsert', label, 'purple', '', ?${nowIdx}, 0, by_name FROM (${rows})`,
+        ).bind(...binds),
+        db.prepare(
+            `INSERT INTO notes (armory_id, label, color, text, item_name, item_id, updated_at, updated_by_id, updated_by_name,
+                                deleted, fingerprint, changed_at, bonuses)
+             SELECT armory_id, label, 'purple', '', item_name, item_id, ?${nowIdx}, 0, by_name, 0, fingerprint, ?${nowIdx}, bonuses
+             FROM (${rows}) WHERE true
+             ON CONFLICT(armory_id) DO UPDATE SET
+               label = excluded.label, color = 'purple', text = '', item_name = excluded.item_name, item_id = excluded.item_id,
+               fingerprint = excluded.fingerprint, bonuses = excluded.bonuses, updated_at = excluded.updated_at,
+               changed_at = excluded.changed_at, updated_by_id = 0, updated_by_name = excluded.updated_by_name, deleted = 0
+             WHERE notes.deleted = 1`,
+        ).bind(...binds),
+    ];
+}
+
+/**
  * Apply "Borrowed from" marks waiting for items that have now reached the
  * armory (matched by stats), and drop expired ones. One cheap query when
  * nothing is waiting.
@@ -1122,7 +1165,12 @@ async function applyBorrowPending(db, now) {
     const waiting = await db.prepare('SELECT COUNT(*) AS n FROM borrow_pending').first();
     if (!Number(waiting?.n)) return 0;
     const cutoff = now - CONFIG.BORROW_PENDING_MS;
-    const [upd] = await db.batch([
+    // Labels first: they join on borrow_pending, which the last statement empties.
+    const matched = `SELECT t.armory_id, p.borrowed_from AS lender, p.borrowed_by_name AS by_name
+                     FROM borrow_pending AS p JOIN tracked_items AS t ON t.fingerprint = p.fingerprint
+                     WHERE t.fingerprint <> '' AND t.in_armory = 1 AND p.created_at >= ?1`;
+    const results = await db.batch([
+        ...lenderLabelStmts(db, matched, [cutoff, now], 2),
         db.prepare(
             `UPDATE tracked_items SET borrowed_from = p.borrowed_from, borrowed_at = p.created_at,
                     borrowed_by_name = p.borrowed_by_name, borrowed_trade_id = p.trade_id
@@ -1135,11 +1183,15 @@ async function applyBorrowPending(db, now) {
                OR fingerprint IN (SELECT fingerprint FROM tracked_items WHERE in_armory = 1 AND borrowed_from <> '')`,
         ).bind(cutoff),
     ]);
-    const n = Number(upd?.meta?.changes) || 0;
+    const n = Number(results[2]?.meta?.changes) || 0;
+    const labelled = Number(results[1]?.meta?.changes) || 0;
+    const dropped = Number(results[3]?.meta?.changes) || 0;
     if (n) {
-        await activityStmt(db, { kind: 'borrowed', detail: `${n} borrowed item${n === 1 ? '' : 's'} reached the armory and were matched by stats` }).run();
-        await bumpBorrowVersion(db);
+        const what = `${n} borrowed item${n === 1 ? '' : 's'} reached the armory and were matched by stats`;
+        await activityStmt(db, { kind: 'borrowed', detail: labelled ? `${what} (${labelled} labelled with the lender's name)` : what }).run();
     }
+    // Dropped rows change the pending list scripts show on the Deposit page.
+    if (n || dropped) await bumpBorrowVersion(db);
     return n;
 }
 
@@ -1159,7 +1211,21 @@ async function handleTradeBorrow(request, rawId, cfg) {
     const body = await readJson(request);
     const from = cleanOwner(body?.from);
     if (!from) {
-        const [a, b] = await cfg.db.batch([
+        const now = Date.now();
+        // Untouched lender labels go too (an edited label or a note with text stays).
+        const autoLabel = `SELECT n.armory_id FROM notes n JOIN tracked_items t ON t.armory_id = n.armory_id
+                           WHERE t.borrowed_trade_id = ?1 AND n.deleted = 0 AND n.color = 'purple' AND n.text = ''
+                             AND n.label = substr(t.borrowed_from, 1, ${CONFIG.LABEL_MAX})`;
+        const [, , a, b] = await cfg.db.batch([
+            cfg.db.prepare(
+                `INSERT INTO note_log (armory_id, action, label, color, text, at, by_id, by_name)
+                 SELECT armory_id, 'delete', NULL, NULL, NULL, ?2, ?3, ?4 FROM (${autoLabel})`,
+            ).bind(id, now, user.pid, user.name),
+            cfg.db.prepare(
+                `UPDATE notes SET deleted = 1, label = '', text = '', fingerprint = '', bonuses = '', updated_at = ?2, changed_at = ?2,
+                        updated_by_id = ?3, updated_by_name = ?4
+                 WHERE armory_id IN (${autoLabel})`,
+            ).bind(id, now, user.pid, user.name),
             cfg.db.prepare(
                 `UPDATE tracked_items SET borrowed_from = '', borrowed_at = NULL, borrowed_by_name = '', borrowed_trade_id = ''
                  WHERE borrowed_trade_id = ?1`,
@@ -1182,7 +1248,9 @@ async function handleTradeBorrow(request, rawId, cfg) {
         else if (!pending.includes(fp)) pending.push(fp);
     }
     const now = Date.now();
+    const knownRows = 'SELECT value AS armory_id, ?2 AS lender, ?3 AS by_name FROM json_each(?1)';
     await cfg.db.batch([
+        ...lenderLabelStmts(cfg.db, knownRows, [JSON.stringify(known), from, user.name, now], 4),
         cfg.db.prepare(
             `UPDATE tracked_items SET borrowed_from = ?2, borrowed_at = ?3, borrowed_by_name = ?4, borrowed_trade_id = ?5
              WHERE armory_id IN (SELECT value FROM json_each(?1))`,

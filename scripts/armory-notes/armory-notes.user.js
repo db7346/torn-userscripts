@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Armory Notes
 // @namespace    dadgum.torn.armorynotes
-// @version      2.9.3
+// @version      2.9.4
 // @description  Colored labels and notes on individual weapons and armor (keyed by armory ID). Private notes on the Items page; shared faction notes in the Faction Armory.
 // @author       DadGum
 // @license      MIT
@@ -49,6 +49,12 @@
  * Author: DadGum
  *
  * Changelog
+ *   2.9.4 (2026-11-07) Lender labels: items ticked "Borrowed from <lender>"
+ *                      on a trade show a purple pill with the lender's name
+ *                      on your Deposit, trade and Items pages until they
+ *                      reach the armory. There they get a real purple
+ *                      faction label with the lender's name (an existing
+ *                      note is never overwritten).
  *   2.9.3 (2026-11-07) "How it works" explains borrowed items and Missing
  *                      items (with a sample of the trade box); the note
  *                      editor's field is now just "Borrowed from".
@@ -220,6 +226,8 @@
         LABEL_MAX: 16,
         TEXT_MAX: 1000,
         DEFAULT_COLOR: 'blue',
+        /** Color of the faction label a borrowed item gets with its lender's name. */
+        LENDER_COLOR: 'purple',
         /** Label palette. Stored by key, so only these colors can ever be applied. */
         COLORS: Object.freeze([
             Object.freeze({ key: 'red', name: 'Red', bg: '#d9534f', fg: '#ffffff' }),
@@ -427,6 +435,7 @@
         kindTrade: `${PREFIX}-btn--trade`,
         btnHidden: `${PREFIX}-btn--hidden`,
         btnReadOnly: `${PREFIX}-btn--ro`,
+        btnPending: `${PREFIX}-btn--pending`,
         btnHoverOnly: `${PREFIX}-btn--hover`,
         popMeta: `${PREFIX}-pop-meta`,
         checklist: `${PREFIX}-checklist`,
@@ -499,6 +508,7 @@
     const DATA_SRC = 'tmsAnSrc'; // 'local' | 'shared'
     const DATA_FP = 'tmsAnFp';   // item stat fingerprint (on buttons and rows)
     const DATA_BONUS = 'tmsAnBonus'; // readable bonus text, e.g. "22% Execute"
+    const DATA_PENDING = 'tmsAnPending'; // lender of a borrowed item not yet in the armory
     const TORN_TRANSIENT = new Set(CONFIG.TORN_TRANSIENT_CODES);
 
     /**
@@ -1300,6 +1310,30 @@
         _borrowed: {},
         /** Server's version of the borrowed list ('' = not loaded this page). */
         _bv: '',
+        /** @type {Object<string, string>} fingerprint -> lender (ticked as borrowed, not in the armory yet). */
+        _pending: {},
+        /** True when the pending list changed since takeBorrowChanged() (lender pills to redraw). */
+        _borrowChanged: false,
+
+        /**
+         * Who lent an item that was ticked as borrowed on a trade but has not
+         * reached the armory yet ('' if none).
+         * @param {string} fp - Item stat fingerprint.
+         * @returns {string} Lender's name.
+         */
+        pendingLender(fp) {
+            return fp && Object.hasOwn(this._pending, fp) ? this._pending[fp] : '';
+        },
+
+        /**
+         * Whether the pending list changed since the last call (resets it).
+         * @returns {boolean} True if changed.
+         */
+        takeBorrowChanged() {
+            const changed = this._borrowChanged;
+            this._borrowChanged = false;
+            return changed;
+        },
 
         /**
          * Who lent this item to the faction ('' if not borrowed).
@@ -1352,6 +1386,8 @@
             this._notes = {};
             this._borrowed = {};
             this._bv = '';
+            this._pending = {};
+            this._borrowChanged = false;
             this._since = 0;
             this._fetchedAt = 0;
             this._serverUrl = serverUrl;
@@ -1496,7 +1532,13 @@
                 if (gen !== this._gen) return [];
                 if (!data || !Array.isArray(data.notes)) throw new ServerError('bad_response', 'Unexpected response from the notes server.');
                 changed.push(...this.apply(data.notes));
-                if (data.borrowed && typeof data.borrowed === 'object') this._borrowed = { ...data.borrowed };
+                if (data.borrowed && typeof data.borrowed === 'object') {
+                    // Lenders only show in tooltips (built on hover): no redraw needed for them.
+                    this._borrowed = { ...data.borrowed };
+                    const pending = data.borrowPending && typeof data.borrowPending === 'object' ? { ...data.borrowPending } : {};
+                    if (JSON.stringify(pending) !== JSON.stringify(this._pending)) this._borrowChanged = true;
+                    this._pending = pending;
+                }
                 if (typeof data.borrowVersion === 'string') this._bv = data.borrowVersion;
                 if (typeof data.canEdit === 'boolean') Session.setCanEdit(data.canEdit);
                 if (typeof data.isAdmin === 'boolean') Session.setIsAdmin(data.isAdmin);
@@ -2216,6 +2258,7 @@
                 if (stateChanged()) rerenderAll();
                 else changed.forEach((id) => refreshId(id));
                 if (changed.length) rescanDynamic();
+                if (SharedStore.takeBorrowChanged()) refreshAll(); // lender pills came or went
                 return true;
             } catch (err) {
                 handleSharedError('Faction notes', err, { quiet });
@@ -2267,6 +2310,7 @@
 .${CLS.kindTrade}{margin:0 4px;max-width:${CONFIG.ITEMS_PILL_MAX_PX}px;box-shadow:inset 0 0 0 1px rgba(255,255,255,.55);
   float:none;vertical-align:middle;}
 .${CLS.btnReadOnly}{cursor:help;}
+.${CLS.btnPending}{box-shadow:inset 0 0 0 1px rgba(255,255,255,.55);outline:1px dashed #a371f7;outline-offset:1px;}
 .${CLS.btnHoverOnly}{opacity:0 !important;}
 li:hover .${CLS.btnHoverOnly},.${CLS.thumbHost}:hover .${CLS.btnHoverOnly},
 .${CLS.btnHoverOnly}:focus-visible{opacity:.55 !important;}
@@ -2565,8 +2609,23 @@ ${colorRules}
      * @param {Note|null} note - Note.
      * @returns {string} Signature.
      */
-    function buttonSig(srcKind, note) {
-        return `${srcKind}|${Sources[srcKind].canEdit() ? 'e' : 'r'}|${Data.noteSignature(note)}`;
+    function buttonSig(srcKind, note, pending = '') {
+        return `${srcKind}|${Sources[srcKind].canEdit() ? 'e' : 'r'}|${Data.noteSignature(note)}|${pending}`;
+    }
+
+    /**
+     * Lender to show on a read-only faction pill with no note: the item was
+     * ticked "Borrowed from <lender>" on a trade and has not reached the
+     * armory yet (matched by its stats).
+     * @param {string} kind - Button kind.
+     * @param {'local'|'shared'} srcKind - Source kind.
+     * @param {Note|null} note - The item's note.
+     * @param {string} fp - Item stat fingerprint ('' if unknown).
+     * @returns {string} Lender ('' if none).
+     */
+    function pendingLenderFor(kind, srcKind, note, fp) {
+        if (note || srcKind !== 'shared' || !NOTE_ONLY_KINDS.has(kind)) return '';
+        return SharedStore.pendingLender(fp);
     }
 
     /* ---- Tooltip --------------------------------------------------------- */
@@ -2589,7 +2648,15 @@ ${colorRules}
             const note = src.get(id);
             const editable = isEditable(btn);
             const tip = el('div', { cls: CLS.tip, attrs: { role: 'tooltip' } });
-            if (note) {
+            const pending = btn.dataset[DATA_PENDING] ?? '';
+            if (!note && pending) {
+                const title = el('div', { cls: CLS.tipTitle, text: `Borrowed from ${pending}` });
+                title.style.color = Data.colorFor(CONFIG.LENDER_COLOR).bg;
+                tip.append(title, el('div', {
+                    cls: CLS.tipMeta,
+                    text: 'Ticked on a trade · gets this faction label when it reaches the armory',
+                }));
+            } else if (note) {
                 if (note.label) {
                     const color = Data.colorFor(note.color);
                     const title = el('div', { cls: CLS.tipTitle, text: note.label });
@@ -2748,6 +2815,7 @@ ${colorRules}
      * @returns {boolean} True if editable.
      */
     function isEditable(btn) {
+        if (btn.dataset[DATA_PENDING]) return false; // lender pill: the label is added by the server
         return btn.dataset[DATA_KIND] !== 'trade' && sourceOf(btn).canEdit();
     }
 
@@ -2774,7 +2842,14 @@ ${colorRules}
     function renderNoteButton(btn) {
         const kind = btn.dataset[DATA_KIND];
         const src = sourceOf(btn);
-        const note = src.get(btn.dataset[DATA_ID]);
+        const realNote = src.get(btn.dataset[DATA_ID]);
+        const pending = pendingLenderFor(kind, src.kind, realNote, btn.dataset[DATA_FP] ?? '');
+        if (pending) btn.dataset[DATA_PENDING] = pending;
+        else delete btn.dataset[DATA_PENDING];
+        // A lender pill looks like the purple label the item gets in the armory.
+        const note = realNote ?? (pending
+            ? { label: pending.slice(0, CONFIG.LABEL_MAX), color: CONFIG.LENDER_COLOR, text: '', updated: 0 }
+            : null);
         const editable = isEditable(btn);
         const hidden = !note && (!editable || NOTE_ONLY_KINDS.has(kind));
         // "Show tag icons on items without notes" off: empty icons appear only on hover/focus.
@@ -2789,6 +2864,7 @@ ${colorRules}
             editable ? '' : CLS.btnReadOnly,
             hidden ? CLS.btnHidden : '',
             hoverOnly ? CLS.btnHoverOnly : '',
+            pending ? CLS.btnPending : '',
         ].filter(Boolean).join(' ');
 
         btn.replaceChildren();
@@ -2799,10 +2875,11 @@ ${colorRules}
         const what = src.kind === 'shared' ? 'Faction note' : 'Note';
         let aria = `Add ${what.toLowerCase()} to ${name}`;
         if (note) aria = `${what} for ${name}: ${note.label || 'unlabelled'}.${editable ? ' Click to edit.' : ''}`;
+        if (pending) aria = `${name} is borrowed from ${pending}. Its faction label is added when it reaches the armory.`;
         btn.setAttribute('aria-label', aria);
         if (hidden) btn.setAttribute('tabindex', '-1');
         else btn.removeAttribute('tabindex');
-        btn.dataset[DATA_SIG] = buttonSig(src.kind, note);
+        btn.dataset[DATA_SIG] = buttonSig(src.kind, realNote, pending);
 
         if (kind === 'faction' && btn.parentElement) {
             btn.parentElement.classList.toggle(CLS.factionHost, !hidden);
@@ -3450,7 +3527,8 @@ ${colorRules}
                     el('div', { cls: CLS.sample }, [borrowBox]),
                     tipList([
                         'Someone lending items to the faction for a war? On their trade, tick **Borrowed from …** (next to Log This As Traded). It marks every bonus weapon and armor piece they send.',
-                        'New items are matched by their stats when they reach the armory. One-off item? Fill in **Borrowed from** in the note editor; clear it if the item becomes ours.',
+                        'Until they reach the armory, those items show a dashed **purple pill with the lender\'s name** on your Deposit and Items pages, so you can spot them and deposit them. In the armory they get a real purple faction label with the lender\'s name (an existing note is never replaced).',
+                        'One-off item? Fill in **Borrowed from** in the note editor; clear it if the item becomes ours.',
                         'While in the armory they show **In armory · Borrowed from …**. When they go back they are **hidden**, not "Missing", and if they return they come back with their label, note and owner.',
                     ]),
                     el('h4', { text: 'Missing items' }),
@@ -4423,7 +4501,12 @@ ${colorRules}
      * it reuses that adapter. Read-only faction notes, like on trades.
      * @type {PageAdapter}
      */
-    const DEPOSIT_ADAPTER = { ...TRADE_ADD_ADAPTER, name: 'faction-deposit' };
+    const DEPOSIT_ADAPTER = {
+        ...TRADE_ADD_ADAPTER,
+        name: 'faction-deposit',
+        // Same bonus icons as the Items page: lets borrowed items show their lender.
+        getStats: (row) => statsFromIcons(row.querySelector(CONFIG.SEL.ITEMS_STATS)),
+    };
 
     /** Trade page, trade view: your own items only (theirs carry no armory ID). @type {PageAdapter} */
     const TRADE_VIEW_ADAPTER = {
@@ -4558,7 +4641,8 @@ ${colorRules}
             const host = spec.findHost(row);
             if (!host) continue;
             const srcKind = spec.source();
-            const sig = buttonSig(srcKind, Sources[srcKind].get(id));
+            const existingNote = Sources[srcKind].get(id);
+            const sig = buttonSig(srcKind, existingNote, pendingLenderFor(spec.kind, srcKind, existingNote, fp));
             let btn = host.querySelector(`:scope > .${CLS.btn}[data-tms-an-kind="${spec.kind}"]`);
             if (btn && btn.dataset[DATA_ID] === id && btn.dataset[DATA_SIG] === sig) continue;
             if (!btn) {
