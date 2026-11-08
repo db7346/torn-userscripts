@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Armory Notes
 // @namespace    dadgum.torn.armorynotes
-// @version      2.9.2
+// @version      2.9.3
 // @description  Colored labels and notes on individual weapons and armor (keyed by armory ID). Private notes on the Items page; shared faction notes in the Faction Armory.
 // @author       DadGum
 // @license      MIT
@@ -49,6 +49,9 @@
  * Author: DadGum
  *
  * Changelog
+ *   2.9.3 (2026-11-07) "How it works" explains borrowed items and Missing
+ *                      items (with a sample of the trade box); the note
+ *                      editor's field is now just "Borrowed from".
  *   2.9.2 (2026-11-07) Security: updates now come from the "release" branch
  *                      (published on purpose, not every change); network
  *                      access limited to the faction's own server; Full
@@ -2299,7 +2302,7 @@ ${colorRules}
 .${CLS.uiDanger}:hover{background:#933333;}
 .${CLS.overlay}{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:${z + 2};display:flex;
   align-items:center;justify-content:center;}
-.${CLS.modal}{width:340px;max-width:calc(100vw - 32px);padding:14px;box-sizing:border-box;${panel}}
+.${CLS.modal}{width:340px;max-width:calc(100vw - 32px);max-height:calc(100vh - 32px);overflow-y:auto;padding:14px;box-sizing:border-box;${panel}}
 .${CLS.modal} h3{margin:0 0 8px;font-size:14px;}
 .${CLS.modalBody}{margin-bottom:10px;white-space:pre-wrap;}
 .${CLS.modal} input[type="file"]{display:block;margin:8px 0;color:#e6e6e6;max-width:100%;}
@@ -3080,7 +3083,7 @@ ${colorRules}
                 datalist,
                 swatchWrap,
                 el('label', { cls: CLS.field }, [el('span', { text: 'Note' }), textArea, counter]),
-                borrowInput ? el('label', { cls: CLS.field }, [el('span', { text: 'Borrowed from (hidden while it is given back)' }), borrowInput]) : null,
+                borrowInput ? el('label', { cls: CLS.field }, [el('span', { text: 'Borrowed from' }), borrowInput]) : null,
                 statusLine,
                 el('div', { cls: CLS.actions }, [deleteBtn, el('span', { cls: CLS.spacer }), cancelBtn, saveBtn]),
             ]);
@@ -3432,6 +3435,8 @@ ${colorRules}
         if (isEditor) {
             const box = el('label', { cls: [CLS.logBox, CLS.logBoxNudge], attrs: { 'aria-hidden': 'true' } },
                 [el('input', { attrs: { type: 'checkbox', tabindex: '-1' } }), el('span', { text: 'Log This As Traded (2 faction items)' })]);
+            const borrowBox = el('label', { cls: [CLS.logBox, CLS.borrowBox], attrs: { 'aria-hidden': 'true' } },
+                [el('input', { attrs: { type: 'checkbox', tabindex: '-1' } }), el('span', { text: 'Borrowed from ChaosRipper' })]);
             tabs.push({
                 name: 'Editors',
                 body: el('div', {}, [
@@ -3440,8 +3445,17 @@ ${colorRules}
                     tipList([
                         'Tick **Log This As Traded** in the "This trade expires" bar to record the trade. It turns yellow when a trade has faction items that are not logged yet.',
                         'Made a mistake? Untick it, or use **Editor tools > Trade log** to remove an entry.',
-                        'Someone lending items to the faction? Tick **Borrowed from …** on their trade. When the items go back they are hidden instead of "Missing", and they keep their tags if they come back.',
-                        'Sold or gave something away? **Editor tools > Missing items** marks items sold, removed or returned to their owner, many at once.',
+                    ]),
+                    el('h4', { text: 'Borrowed items' }),
+                    el('div', { cls: CLS.sample }, [borrowBox]),
+                    tipList([
+                        'Someone lending items to the faction for a war? On their trade, tick **Borrowed from …** (next to Log This As Traded). It marks every bonus weapon and armor piece they send.',
+                        'New items are matched by their stats when they reach the armory. One-off item? Fill in **Borrowed from** in the note editor; clear it if the item becomes ours.',
+                        'While in the armory they show **In armory · Borrowed from …**. When they go back they are **hidden**, not "Missing", and if they return they come back with their label, note and owner.',
+                    ]),
+                    el('h4', { text: 'Missing items' }),
+                    tipList([
+                        'Sold or gave something away? **Editor tools > Missing items** lists items that left without a logged trade. Tick them and choose **Mark sold**, **Mark removed** or **Returned to owner**, many at once.',
                     ]),
                     el('h4', { text: 'Notes' }),
                     tipList([

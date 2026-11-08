@@ -1,3 +1,4 @@
+import { BANNER_DATA_URI } from './banner.mjs';
 /**
  * Read-only "Faction Armory" view page served by the Worker at /view?key=….
  *
@@ -49,13 +50,14 @@ export function viewHtml(rows, nonce, generatedAt, sync = { configured: false, l
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
-<title>Faction Armory</title>
+<title>TNL Armory</title>
 <style nonce="${n}">
 :root{--bg:#0d1117;--panel:#161b22;--row1:#1b1f24;--row2:#22272e;--line:#30363d;--text:#c9d1d9;--dim:#8b949e;
   --green:#3fb950;--green2:#7ee787;--red:#ff7b72;--blue:#79c0ff;--purple:#d2a8ff;--gold:#e3b341;--orange:#ffa566;--amber:#f0a35e}
 *{box-sizing:border-box}
 html,body{margin:0;background:var(--bg);color:var(--text);font:14px/1.4 Arial,Helvetica,sans-serif}
-header{padding:16px;border-bottom:2px solid var(--green);background:var(--panel)}
+header{padding:16px;border-bottom:2px solid var(--green);background:var(--panel);text-align:center}
+.banner{display:block;margin:0 auto 8px;width:400px;max-width:100%;height:auto}
 h1{margin:0 0 4px;font-size:20px;color:#fff}
 .sub{color:var(--dim);font-size:12px}
 .controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:12px 16px;background:var(--panel);border-bottom:1px solid var(--line);
@@ -136,8 +138,9 @@ header{position:relative}
 </head>
 <body>
 <header>
-  <h1>Faction Armory</h1>
-  <div class="sub">Weapons and armor with bonuses. Click a row for details. Page built <span id="gen"></span> TCT · <span id="sync"></span></div>
+  <img class="banner" src="${BANNER_DATA_URI}" alt="The Next Level" width="400" height="100">
+  <h1>TNL Armory</h1>
+  <div class="sub">Click a row for details · <span id="sync"></span></div>
   <button type="button" class="btn" id="act-open" aria-controls="act" aria-expanded="false">Activity</button>
 </header>
 <aside class="drawer" id="act" hidden aria-label="Recent activity">
@@ -180,7 +183,6 @@ header{position:relative}
   function tct(ms) { return ms ? new Date(ms).toISOString().slice(0, 16).replace('T', ' ') : ''; }
   function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined && text !== '') e.textContent = text; return e; }
   function num(v) { return typeof v === 'number' ? v.toFixed(2) : ''; }
-  $('gen').textContent = tct(DATA.generatedAt);
   var sy = DATA.sync || {};
   if (!sy.configured) $('sync').textContent = 'armory sync not set up (status based on editors’ armory views)';
   else if (sy.lastOk) { $('sync').textContent = 'armory synced ' + tct(sy.lastOk) + ' TCT'; }

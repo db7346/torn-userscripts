@@ -93,6 +93,7 @@ That is about **1 Torn API call per 12 hours**, and about **1.3 server requests 
 
 ## Changelog
 
+- **2.9.3**: **How it works** explains borrowed items (with a sample of the trade box) and Missing items; long dialogs scroll on small screens; the note editor's field is now just "Borrowed from". View page: TNL banner and title, shorter header.
 - **2.9.2**: Security update. Script updates now come from the **release** branch, so members only get versions that were published on purpose. The script can only contact your faction's own server. **Full Access keys are refused** at sign-in. Editors can only log trades they're part of. Server: a small **Activity** panel on the view page (notes, trades, borrowed and sold marks, editor changes, syncs; last 90 days) and a faster borrowed-items lookup. Needs migration `0008_activity.sql`.
 - **2.9.1**: Faction Armory **Deposit** list shows faction notes (read-only) on your items.
 - **2.9.0**: **Borrowed items:** editors tick **Borrowed from <lender>** on the lender's trade (or fill **Borrowed from** in the note editor). When the items go back they're hidden instead of "Missing", and they come back with their tags. **Editor tools… > Missing items** marks items **sold**, **removed** or **returned to owner**, many at once. Tooltips show "Borrowed from". The view page gets **Borrowed** and **Sold / removed** status filters. Needs migration `0007_borrowed_sold.sql`. Older scripts now see the update notice.

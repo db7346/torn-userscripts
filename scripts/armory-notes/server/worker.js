@@ -1576,7 +1576,7 @@ async function handleView(request, url, env, cfg) {
             'X-Content-Type-Options': 'nosniff',
             'X-Frame-Options': 'DENY',
             'Content-Security-Policy': `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; `
-                + "img-src 'none'; connect-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+                + "img-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         },
     });
 }
