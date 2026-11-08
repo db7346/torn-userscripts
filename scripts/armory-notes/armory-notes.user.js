@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Armory Notes
 // @namespace    dadgum.torn.armorynotes
-// @version      2.9.1
+// @version      2.9.2
 // @description  Colored labels and notes on individual weapons and armor (keyed by armory ID). Private notes on the Items page; shared faction notes in the Faction Armory.
 // @author       DadGum
 // @license      MIT
@@ -14,12 +14,12 @@
 // @grant        GM_addStyle
 // @grant        GM_xmlhttpRequest
 // @grant        GM_info
-// @connect      workers.dev
+// @connect      torn-armory-notes.dbeanwomble.workers.dev
 // @run-at       document-idle
 // @homepageURL  https://github.com/db7346/torn-userscripts/tree/main/scripts/armory-notes
 // @supportURL   https://github.com/db7346/torn-userscripts/issues
-// @updateURL    https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/armory-notes/armory-notes.user.js
-// @downloadURL  https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/armory-notes/armory-notes.user.js
+// @updateURL    https://raw.githubusercontent.com/db7346/torn-userscripts/release/scripts/armory-notes/armory-notes.user.js
+// @downloadURL  https://raw.githubusercontent.com/db7346/torn-userscripts/release/scripts/armory-notes/armory-notes.user.js
 // ==/UserScript==
 
 /* =============================================================================
@@ -49,6 +49,10 @@
  * Author: DadGum
  *
  * Changelog
+ *   2.9.2 (2026-11-07) Security: updates now come from the "release" branch
+ *                      (published on purpose, not every change); network
+ *                      access limited to the faction's own server; Full
+ *                      Access keys are refused at sign-in.
  *   2.9.1 (2026-11-07) Faction Armory > Deposit: faction notes show read-only
  *                      on your items (same list layout as the trade screen).
  *   2.9.0 (2026-11-07) Borrowed items: editors tick "Borrowed from <lender>"
@@ -135,8 +139,9 @@
  *                      JSON export / import (merge or replace), clear all.
  *
  * Torn API key usage disclosure
- *   - Key access level: PUBLIC. Only needed for faction notes; local notes
- *     work with no key at all.
+ *   - Key access level: PUBLIC is all this script needs (Minimal, Limited
+ *     and Custom keys are also accepted; Full Access keys are refused at
+ *     sign-in). Only needed for faction notes; local notes work with no key.
  *   - Who runs the server: your faction's notes admin, on their own
  *     Cloudflare account. Its address is built into this copy of the script.
  *   - Data storage:
@@ -167,10 +172,11 @@
  *   - Key storage & sharing: the key stays in Tampermonkey storage. It is sent
  *     only over HTTPS, in the body of the sign-in request, to your faction's
  *     notes server (about once every 12 hours). The server uses it
- *     for one Torn API call (user basic,faction) to confirm who you are and
- *     that you are in the faction, then forgets it. The key is never logged
+ *     for two Torn API calls (key/info to check the key's access level, and
+ *     user basic,faction to confirm who you are and that you are in the
+ *     faction), then forgets it. The key is never logged
  *     and never put in a URL.
- *   - API calls: Torn API about 1 per 12 hours per member (sign-in, made by
+ *   - API calls: Torn API about 2 per 12 hours per member (sign-in, made by
  *     the server), plus the admin's armory sync (above).
  *     Faction server about 1.3 per minute while the Faction Armory is open
  *     and visible; none otherwise.
@@ -248,7 +254,7 @@
         /** When the "please update" notice was last shown (epoch ms). */
         UPDATE_NAG_KEY: 'tms-armorynotes:update-nag:v1',
         UPDATE_NAG_MS: 24 * 60 * 60 * 1000,
-        INSTALL_URL: 'https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/armory-notes/armory-notes.user.js',
+        INSTALL_URL: 'https://raw.githubusercontent.com/db7346/torn-userscripts/release/scripts/armory-notes/armory-notes.user.js',
         SHARED_FETCHED_KEY: 'tms-armorynotes:shared-fetched:v1',
         AUTH_FAILURE_KEY: 'tms-armorynotes:auth-failure:v1',
         SHARED_CACHE_VERSION: 1,
@@ -2120,7 +2126,7 @@
                     transient: TORN_TRANSIENT.has(code),
                 });
             }
-            if (err.code === 'bad_key_format') return new ServerError(err.code, err.message, { needsKey: true });
+            if (err.code === 'bad_key_format' || err.code === 'key_level') return new ServerError(err.code, err.message, { needsKey: true });
             if (err.code === 'torn_unreachable') return new ServerError(err.code, err.message, { transient: true });
             return err;
         },

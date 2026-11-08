@@ -77,6 +77,16 @@ import { viewHtml } from './view.mjs';
 
 const CONFIG = Object.freeze({
     TORN_API_URL: 'https://api.torn.com/v2/user?selections=basic,faction&comment=ArmoryNotes',
+    TORN_KEY_INFO_URL: 'https://api.torn.com/v2/key/info?comment=ArmoryNotes',
+    /**
+     * Key access levels accepted at sign-in (Torn's key/info access.type). Only
+     * Full Access is refused. If a feature ever needs more than Public, offer a
+     * link that creates a Custom key with only the selections it needs.
+     */
+    ALLOWED_KEY_TYPES: ['Public Only', 'Minimal Access', 'Limited Access', 'Custom'],
+    /** Activity rows kept, and how many the view page shows. */
+    ACTIVITY_KEEP_MS: 90 * 24 * 60 * 60 * 1000,
+    ACTIVITY_SHOWN: 150,
     TOKEN_TTL_MS: 12 * 60 * 60 * 1000,
     ALLOWED_ORIGINS: Object.freeze(['https://www.torn.com', 'https://torn.com']),
     MAX_BODY_BYTES: 512 * 1024,
@@ -489,17 +499,32 @@ async function handleAuth(request, cfg) {
         throw new HttpError(400, 'bad_key_format', 'That does not look like a Torn API key (16 letters/numbers).');
     }
 
-    let data;
-    try {
-        const res = await fetch(CONFIG.TORN_API_URL, { headers: { Authorization: `ApiKey ${key}` } });
-        data = await res.json();
-    } catch {
-        throw new HttpError(502, 'torn_unreachable', 'Could not reach the Torn API. Try again shortly.');
+    /**
+     * One Torn call with the member's key (header only, never in the URL).
+     * @param {string} url - Endpoint.
+     * @returns {Promise<Object>} Parsed body.
+     */
+    const torn = async (url) => {
+        let body;
+        try {
+            const res = await fetch(url, { headers: { Authorization: `ApiKey ${key}` } });
+            body = await res.json();
+        } catch {
+            throw new HttpError(502, 'torn_unreachable', 'Could not reach the Torn API. Try again shortly.');
+        }
+        if (body?.error) {
+            // Pass Torn's ApiError code through so the script can show the right message.
+            throw new HttpError(401, 'torn_error', String(body.error.error ?? 'Torn API error'), { tornCode: Number(body.error.code) });
+        }
+        return body;
+    };
+    // Refuse Full Access keys: this script never needs them.
+    const keyType = String((await torn(CONFIG.TORN_KEY_INFO_URL))?.info?.access?.type ?? '');
+    if (!CONFIG.ALLOWED_KEY_TYPES.includes(keyType)) {
+        throw new HttpError(403, 'key_level',
+            `${keyType || 'This'} keys aren't accepted, to keep your account safe. Please use a Public key (a Limited or Custom key also works).`);
     }
-    if (data?.error) {
-        // Pass Torn's ApiError code through so the script can show the right message.
-        throw new HttpError(401, 'torn_error', String(data.error.error ?? 'Torn API error'), { tornCode: Number(data.error.code) });
-    }
+    const data = await torn(CONFIG.TORN_API_URL);
     const pid = Number(data?.profile?.id);
     const name = String(data?.profile?.name ?? '');
     const fid = Number(data?.faction?.id ?? 0);
@@ -921,6 +946,10 @@ async function handleTradeLog(request, rawId, cfg) {
     const body = await readJson(request);
     const from = String(body?.from ?? '');
     const to = String(body?.to ?? '');
+    // Only a party to the trade can log it: "from" is the logger's own side.
+    if (from.toLowerCase() !== String(user.name).toLowerCase()) {
+        throw new HttpError(403, 'not_party', 'You can only log trades you are part of.');
+    }
     if (!CONFIG.PLAYER_NAME_PATTERN.test(from) || !CONFIG.PLAYER_NAME_PATTERN.test(to)) {
         throw new HttpError(400, 'bad_trade', 'Trade needs both player names.');
     }
@@ -942,6 +971,10 @@ async function handleTradeLog(request, rawId, cfg) {
     if (!logged.length) {
         return json(request, 200, { logged: [], skipped: [...wanted.keys()] }); // nothing eligible: leave any earlier log alone
     }
+    stmts.push(activityStmt(cfg.db, {
+        kind: 'trade', user, armoryId: logged.length === 1 ? logged[0].armoryId : '',
+        detail: `Logged trade #${id} with ${to}: ${logged.map((x) => x.itemName || x.armoryId).slice(0, 6).join(', ')}${logged.length > 6 ? ` (+${logged.length - 6} more)` : ''}`,
+    }));
     await cfg.db.batch(stmts);
     await markSyncWanted(cfg);
     return json(request, 200, { logged, skipped: [...wanted.keys()].filter((aid) => !eligible.has(aid)) });
@@ -991,6 +1024,72 @@ async function handleTradeCheck(request, rawId, cfg) {
     return json(request, 200, { items });
 }
 
+/* ---- Activity log ---------------------------------------------------------- */
+
+/**
+ * Statement that records one line in the activity log (run it alone or in a batch).
+ * @param {any} db - D1 binding.
+ * @param {{kind: string, user?: {pid: number, name: string}|null, armoryId?: string, detail: string}} e - Entry.
+ * @returns {any} Prepared statement.
+ */
+function activityStmt(db, { kind, user = null, armoryId = '', detail }) {
+    return db.prepare('INSERT INTO activity (at, kind, actor_id, actor_name, armory_id, detail) VALUES (?1, ?2, ?3, ?4, ?5, ?6)')
+        .bind(Date.now(), kind, user?.pid ?? 0, user?.name ?? '', armoryId, String(detail).slice(0, 500));
+}
+
+/**
+ * Item names for a list of armory IDs, for readable activity lines.
+ * @param {any} db - D1 binding.
+ * @param {string[]} ids - Armory IDs.
+ * @returns {Promise<string>} e.g. "AK-47, 9mm Uzi (+3 more)".
+ */
+async function itemNames(db, ids) {
+    const { results } = await db.prepare(
+        'SELECT item_name FROM tracked_items WHERE armory_id IN (SELECT value FROM json_each(?1)) LIMIT 6',
+    ).bind(JSON.stringify(ids.slice(0, 6))).all();
+    const names = (results ?? []).map((r) => r.item_name || 'item');
+    return names.join(', ') + (ids.length > names.length ? ` (+${ids.length - names.length} more)` : '');
+}
+
+/**
+ * Recent activity for the view page: note changes (note_log) and everything
+ * else (activity), newest first.
+ * @param {ReturnType<typeof settings>} cfg - Settings.
+ * @returns {Promise<{at: number, kind: string, actor: string, armoryId: string, item: string, detail: string}[]>} Entries.
+ */
+async function recentActivity(cfg) {
+    const n = CONFIG.ACTIVITY_SHOWN;
+    const { results } = await cfg.db.prepare(
+        `SELECT * FROM (
+           SELECT l.at AS at, 'note' AS kind, l.by_name AS actor, l.armory_id AS armory_id,
+                  l.action AS action, l.label AS label, '' AS detail
+           FROM note_log l ORDER BY l.at DESC LIMIT ?1)
+         UNION ALL
+         SELECT * FROM (
+           SELECT a.at, a.kind, a.actor_name, a.armory_id, '', '', a.detail
+           FROM activity a ORDER BY a.at DESC LIMIT ?1)
+         ORDER BY at DESC LIMIT ?1`,
+    ).bind(n).all();
+    const ids = [...new Set((results ?? []).map((r) => r.armory_id).filter(Boolean))];
+    const names = new Map();
+    if (ids.length) {
+        const { results: nm } = await cfg.db.prepare(
+            `SELECT armory_id, item_name FROM tracked_items WHERE armory_id IN (SELECT value FROM json_each(?1))
+             UNION SELECT armory_id, item_name FROM notes WHERE armory_id IN (SELECT value FROM json_each(?1))`,
+        ).bind(JSON.stringify(ids)).all();
+        for (const r of nm ?? []) if (r.item_name && !names.has(r.armory_id)) names.set(r.armory_id, r.item_name);
+    }
+    return (results ?? []).map((r) => {
+        let detail = r.detail;
+        if (r.kind === 'note') {
+            detail = r.action === 'delete' ? 'Deleted the note'
+                : r.action === 'import' ? `Uploaded a note${r.label ? ` "${r.label}"` : ''}`
+                    : `Saved the note${r.label ? ` "${r.label}"` : ''}`;
+        }
+        return { at: r.at, kind: r.kind, actor: r.actor || '', armoryId: r.armory_id || '', item: names.get(r.armory_id) || '', detail };
+    });
+}
+
 /* ---- Borrowed items and sold / removed marks ----------------------------- */
 
 /**
@@ -1037,7 +1136,10 @@ async function applyBorrowPending(db, now) {
         ).bind(cutoff),
     ]);
     const n = Number(upd?.meta?.changes) || 0;
-    if (n) await bumpBorrowVersion(db);
+    if (n) {
+        await activityStmt(db, { kind: 'borrowed', detail: `${n} borrowed item${n === 1 ? '' : 's'} reached the armory and were matched by stats` }).run();
+        await bumpBorrowVersion(db);
+    }
     return n;
 }
 
@@ -1063,6 +1165,7 @@ async function handleTradeBorrow(request, rawId, cfg) {
                  WHERE borrowed_trade_id = ?1`,
             ).bind(id),
             cfg.db.prepare('DELETE FROM borrow_pending WHERE trade_id = ?1').bind(id),
+            activityStmt(cfg.db, { kind: 'borrowed', user, detail: `Removed the "Borrowed" marks of trade #${id}` }),
         ]);
         await bumpBorrowVersion(cfg.db);
         return json(request, 200, { cleared: (Number(a?.meta?.changes) || 0) + (Number(b?.meta?.changes) || 0) });
@@ -1090,6 +1193,10 @@ async function handleTradeBorrow(request, rawId, cfg) {
              ON CONFLICT(fingerprint) DO UPDATE SET borrowed_from = excluded.borrowed_from,
                borrowed_by_name = excluded.borrowed_by_name, trade_id = excluded.trade_id, created_at = excluded.created_at`,
         ).bind(JSON.stringify(pending), from, user.name, id, now),
+        activityStmt(cfg.db, {
+            kind: 'borrowed', user,
+            detail: `Marked ${known.length + pending.length} item${known.length + pending.length === 1 ? '' : 's'} from trade #${id} as borrowed from ${from}`,
+        }),
     ]);
     await bumpBorrowVersion(cfg.db);
     return json(request, 200, { marked: known.length, pending: pending.length });
@@ -1114,6 +1221,9 @@ async function handleItemBorrowed(request, cfg) {
     if (!Number(res?.meta?.changes)) {
         throw new HttpError(404, 'not_tracked', 'Only bonus weapons and armor seen in the faction armory can be marked as borrowed.');
     }
+    await activityStmt(cfg.db, {
+        kind: 'borrowed', user, armoryId: id, detail: from ? `Marked as borrowed from ${from}` : 'Cleared "Borrowed from"',
+    }).run();
     await bumpBorrowVersion(cfg.db);
     return json(request, 200, { armoryId: id, borrowedFrom: from });
 }
@@ -1156,8 +1266,16 @@ async function handleItemsMark(request, cfg) {
         throw new HttpError(400, 'bad_action', 'Unknown action.');
     }
     const res = await stmt.run();
+    const n = Number(res?.meta?.changes) || 0;
+    if (n) {
+        const what = { sold: 'sold', removed: 'removed', clear: 'not sold / removed', returned: `returned to ${cleanOwner(body?.owner)}` }[action];
+        await activityStmt(cfg.db, {
+            kind: 'marked', user, armoryId: ids.length === 1 ? ids[0] : '',
+            detail: `Marked ${n} item${n === 1 ? '' : 's'} as ${what}: ${await itemNames(cfg.db, ids)}`,
+        }).run();
+    }
     if (action === 'returned') await bumpBorrowVersion(cfg.db);
-    return json(request, 200, { updated: Number(res?.meta?.changes) || 0 });
+    return json(request, 200, { updated: n });
 }
 
 /**
@@ -1192,7 +1310,13 @@ async function handleTradeDelete(request, rawId, rawArmoryId, cfg) {
         ? cfg.db.prepare('DELETE FROM trade_log WHERE trade_id = ?1').bind(id)
         : cfg.db.prepare('DELETE FROM trade_log WHERE trade_id = ?1 AND armory_id = ?2').bind(id, armoryId(rawArmoryId));
     const res = await stmt.run();
-    if (res?.meta?.changes) await markSyncWanted(cfg);
+    if (res?.meta?.changes) {
+        await activityStmt(cfg.db, {
+            kind: 'trade', user, armoryId: rawArmoryId === undefined ? '' : armoryId(rawArmoryId),
+            detail: rawArmoryId === undefined ? `Removed the log of trade #${id}` : `Removed one item from the log of trade #${id}`,
+        }).run();
+        await markSyncWanted(cfg);
+    }
     return json(request, 200, { removed: res?.meta?.changes ?? null });
 }
 
@@ -1442,7 +1566,7 @@ async function handleView(request, url, env, cfg) {
     const nonce = crypto.randomUUID().replace(/-/g, '');
     const sync = await readSyncState(cfg.db);
     const syncInfo = { configured: Boolean(env.ARMORY_API_KEY), lastOk: Number(sync.last_ok) || null, lastError: sync.last_error_at > (sync.last_ok || 0) ? sync.last_error ?? '' : '' };
-    return new Response(viewHtml(await sheetRows(cfg), nonce, Date.now(), syncInfo), {
+    return new Response(viewHtml(await sheetRows(cfg), nonce, Date.now(), syncInfo, await recentActivity(cfg)), {
         status: 200,
         headers: {
             'Content-Type': 'text/html; charset=utf-8',
@@ -1660,10 +1784,19 @@ async function runArmorySync(env) {
             remainingToLookUp: Math.max(0, uids.filter((u) => !knownSet.has(u)).length - fresh.length),
         };
         await writeSyncState(cfg.db, { last_ok: now, summary: JSON.stringify(summary) });
+        await cfg.db.batch([
+            activityStmt(cfg.db, {
+                kind: 'sync',
+                detail: `Armory sync: ${uids.length} items in the armory`
+                    + (summary.markedMissing ? `, ${summary.markedMissing} newly gone` : ''),
+            }),
+            cfg.db.prepare('DELETE FROM activity WHERE at < ?1').bind(now - CONFIG.ACTIVITY_KEEP_MS),
+        ]);
         return summary;
     } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         await writeSyncState(cfg.db, { last_error: message, last_error_at: Date.now() });
+        await activityStmt(cfg.db, { kind: 'sync', detail: `Armory sync failed: ${message}` }).run().catch(() => {});
         console.error('Armory sync failed:', message); // never logs the key
         return { ok: false, error: message };
     }
@@ -1811,6 +1944,7 @@ async function handleEditorAdd(request, rawPid, env, cfg) {
         `INSERT INTO editors (player_id, player_name, added_by_id, added_by_name, added_at) VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(player_id) DO UPDATE SET player_name = excluded.player_name`,
     ).bind(pid, member?.name ?? '', user.pid, user.name, Date.now()).run();
+    await activityStmt(cfg.db, { kind: 'editors', user, detail: `Made ${member?.name || `player ${pid}`} [${pid}] an editor` }).run();
     return json(request, 200, { editors: await editorList(cfg, m.members) });
 }
 
@@ -1828,8 +1962,12 @@ async function handleEditorRemove(request, rawPid, env, cfg) {
     const pid = playerId(rawPid);
     if (pid === cfg.adminId) throw new HttpError(400, 'is_admin', 'The admin cannot be removed. Change ADMIN_ID in Cloudflare instead.');
     await loadEditors(cfg); // make sure the legacy list was copied first, so it cannot come back
-    await cfg.db.prepare('DELETE FROM editors WHERE player_id = ?1').bind(pid).run();
+    const gone = await cfg.db.prepare('DELETE FROM editors WHERE player_id = ?1').bind(pid).run();
     const m = await factionMembers(env, cfg, false);
+    if (Number(gone?.meta?.changes)) {
+        const who = m.members.find((x) => x.id === pid)?.name || `player ${pid}`;
+        await activityStmt(cfg.db, { kind: 'editors', user, detail: `Removed ${who} [${pid}] as an editor` }).run();
+    }
     return json(request, 200, { editors: await editorList(cfg, m.members) });
 }
 

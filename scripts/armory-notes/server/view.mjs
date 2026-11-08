@@ -38,9 +38,10 @@ function safeJson(value) {
  * @param {string} nonce - CSP nonce for the inline script and style.
  * @param {number} generatedAt - Epoch ms.
  * @param {{configured: boolean, lastOk: (number|null), lastError: string}} [sync] - Armory sync state.
+ * @param {{at: number, kind: string, actor: string, armoryId: string, item: string, detail: string}[]} [activity] - Recent activity, newest first.
  * @returns {string} HTML document.
  */
-export function viewHtml(rows, nonce, generatedAt, sync = { configured: false, lastOk: null, lastError: '' }) {
+export function viewHtml(rows, nonce, generatedAt, sync = { configured: false, lastOk: null, lastError: '' }, activity = []) {
     const n = esc(nonce);
     return `<!doctype html>
 <html lang="en">
@@ -115,14 +116,38 @@ tr.detail td{background:#0f141a;border-bottom:1px solid var(--line);padding:10px
 .dl{display:grid;grid-template-columns:max-content 1fr;gap:4px 14px;font-size:13px}
 .dl dt{color:var(--dim)}.dl dd{margin:0;color:var(--text)}
 .empty{padding:24px 16px;color:var(--dim)}
-@media (max-width:640px){header,.controls{padding-left:16px;padding-right:16px}.count{width:100%;margin-left:0}}
+header{position:relative}
+#act-open{position:absolute;right:24px;top:18px}
+.drawer{position:fixed;top:0;right:0;bottom:0;width:380px;max-width:100%;background:var(--panel);border-left:1px solid var(--line);
+  box-shadow:-8px 0 24px rgba(0,0,0,.45);display:flex;flex-direction:column;z-index:20}
+.drawer[hidden]{display:none}
+.drawer-head{display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid var(--line)}
+.drawer-head h2{margin:0;font-size:14px;color:var(--text);flex:1}
+.drawer-tools{display:flex;gap:6px;padding:10px 14px;border-bottom:1px solid var(--line)}
+.drawer-tools input,.drawer-tools select{flex:1;min-width:0;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font:inherit;font-size:12px}
+.act-list{overflow:auto;flex:1;margin:0;padding:0;list-style:none}
+.act-list li{padding:8px 14px;border-bottom:1px solid var(--line);font-size:12px;line-height:1.45}
+.act-meta{color:var(--dim);font-size:11px;display:flex;gap:6px;align-items:center}
+.act-kind{padding:0 6px;border-radius:8px;background:var(--row2);color:var(--dim);font-size:10px;text-transform:uppercase;letter-spacing:.03em}
+.act-item{color:var(--text);font-weight:700}
+.act-empty{color:var(--dim);padding:14px}
+@media (max-width:640px){header,.controls{padding-left:16px;padding-right:16px}.count{width:100%;margin-left:0}#act-open{position:static;margin-top:8px}}
 </style>
 </head>
 <body>
 <header>
   <h1>Faction Armory</h1>
   <div class="sub">Weapons and armor with bonuses. Click a row for details. Page built <span id="gen"></span> TCT · <span id="sync"></span></div>
+  <button type="button" class="btn" id="act-open" aria-controls="act" aria-expanded="false">Activity</button>
 </header>
+<aside class="drawer" id="act" hidden aria-label="Recent activity">
+  <div class="drawer-head"><h2>Recent activity</h2><button type="button" class="btn" id="act-close">Close</button></div>
+  <div class="drawer-tools">
+    <input id="act-q" type="search" placeholder="Search person, item, text…" aria-label="Search activity">
+    <select id="act-kind" aria-label="Type"><option value="">All</option><option value="note">Notes</option><option value="trade">Trades</option><option value="borrowed">Borrowed</option><option value="marked">Sold / removed</option><option value="editors">Editors</option><option value="sync">Sync</option></select>
+  </div>
+  <ul class="act-list" id="act-list"></ul>
+</aside>
 <div class="tabs" role="tablist">
   <button class="tab" role="tab" id="tab-weapons" data-type="weapons" aria-selected="true">Weapons<span class="n" id="n-weapons"></span></button>
   <button class="tab" role="tab" id="tab-armor" data-type="armor" aria-selected="false">Armor<span class="n" id="n-armor"></span></button>
@@ -144,7 +169,7 @@ tr.detail td{background:#0f141a;border-bottom:1px solid var(--line);padding:10px
   </table>
   <div class="empty" id="empty" hidden>No items match.</div>
 </div>
-<script type="application/json" id="data">${safeJson({ generatedAt, rows, sync })}</script>
+<script type="application/json" id="data">${safeJson({ generatedAt, rows, sync, activity })}</script>
 <script nonce="${n}">
 (function () {
   'use strict';
@@ -161,6 +186,39 @@ tr.detail td{background:#0f141a;border-bottom:1px solid var(--line);padding:10px
   else if (sy.lastOk) { $('sync').textContent = 'armory synced ' + tct(sy.lastOk) + ' TCT'; }
   else $('sync').textContent = 'armory sync has not run yet';
   if (sy.configured && sy.lastError) { var w = el('span', 'warn', ' · last sync failed: ' + sy.lastError); $('sync').appendChild(w); }
+
+  // ---- Activity drawer (last 90 days, newest first) ----
+  var KIND_NAMES = { note: 'Note', trade: 'Trade', borrowed: 'Borrowed', marked: 'Sold / removed', editors: 'Editors', sync: 'Sync' };
+  function renderActivity() {
+    var q = $('act-q').value.trim().toLowerCase(), kind = $('act-kind').value, list = $('act-list'), shown = 0;
+    list.textContent = '';
+    (DATA.activity || []).forEach(function (a) {
+      if (kind && a.kind !== kind) return;
+      if (q && [a.actor, a.item, a.detail, a.armoryId].join(' ').toLowerCase().indexOf(q) === -1) return;
+      var li = el('li');
+      var meta = el('div', 'act-meta');
+      meta.appendChild(el('span', 'act-kind', KIND_NAMES[a.kind] || a.kind));
+      meta.appendChild(el('span', '', tct(a.at) + ' TCT' + (a.actor ? ' · ' + a.actor : '')));
+      li.appendChild(meta);
+      var line = el('div');
+      if (a.item || a.armoryId) line.appendChild(el('span', 'act-item', (a.item || 'Item') + (a.armoryId ? ' #' + a.armoryId : '') + ': '));
+      line.appendChild(document.createTextNode(a.detail));
+      li.appendChild(line);
+      list.appendChild(li);
+      shown++;
+    });
+    if (!shown) list.appendChild(el('li', 'act-empty', 'No activity matches.'));
+  }
+  function toggleActivity(open) {
+    $('act').hidden = !open;
+    $('act-open').setAttribute('aria-expanded', String(open));
+    if (open) { renderActivity(); $('act-q').focus(); }
+  }
+  $('act-open').addEventListener('click', function () { toggleActivity($('act').hidden); });
+  $('act-close').addEventListener('click', function () { toggleActivity(false); });
+  $('act-q').addEventListener('input', renderActivity);
+  $('act-kind').addEventListener('change', renderActivity);
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !$('act').hidden) toggleActivity(false); });
 
   // Default column order per tab. 'item' is always first and can't be moved.
   var DEFAULT_COLS = {

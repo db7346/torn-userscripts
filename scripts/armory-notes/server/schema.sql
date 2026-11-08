@@ -108,3 +108,18 @@ CREATE TABLE IF NOT EXISTS editors (
     added_by_name TEXT NOT NULL DEFAULT '',
     added_at      INTEGER NOT NULL DEFAULT 0
 );
+
+-- Activity log for the view page (trades, borrowed / sold marks, editors, syncs).
+-- Note edits are in note_log. Rows older than 90 days are removed by the sync.
+CREATE TABLE IF NOT EXISTS activity (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    at         INTEGER NOT NULL,
+    kind       TEXT    NOT NULL,
+    actor_id   INTEGER NOT NULL DEFAULT 0,
+    actor_name TEXT    NOT NULL DEFAULT '',
+    armory_id  TEXT    NOT NULL DEFAULT '',
+    detail     TEXT    NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_activity_at ON activity (at);
+CREATE INDEX IF NOT EXISTS idx_note_log_at ON note_log (at);
+CREATE INDEX IF NOT EXISTS idx_tracked_borrowed ON tracked_items (borrowed_from) WHERE borrowed_from <> '';

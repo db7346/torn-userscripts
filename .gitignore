@@ -13,3 +13,7 @@ node_modules/
 # Never commit API keys or local config
 .env
 *.key
+
+# Cloudflare Wrangler local secrets (never commit)
+.dev.vars
+.dev.vars.*

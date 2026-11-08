@@ -99,6 +99,7 @@ Some releases change the database. Run each new file in [`migrations/`](migratio
 | `0005_armory_sync.sql` | 2.6.0 | Adds armory status, "missing since", loans, and sync bookkeeping |
 | `0006_editors.sql` | 2.7.0 | Adds the editor list managed by the admin. Also add the `ADMIN_ID` variable (your player ID). An existing `EDITOR_IDS` list is copied in automatically the first time; after that `EDITOR_IDS` is unused and can be deleted. |
 | `0007_borrowed_sold.sql` | 2.9.0 | Adds borrowed items and sold / removed marks |
+| `0008_activity.sql` | 2.9.2 | Adds the activity log (view page **Activity**) and a faster borrowed-items lookup |
 
 New databases created from `schema.sql` already include every migration.
 
@@ -175,6 +176,18 @@ It has a dark theme, colored labels, search, filters, sorting, and columns each 
    ```
 
 Anyone with the link can view the list. To revoke it, change `VIEW_TOKEN` and click Deploy; the old link stops working at once. The "hidden" editor names are only tucked away on screen: they are still in the page data.
+
+## Releases (what members get)
+
+Members' Tampermonkey updates from the **`release`** branch, not `main`. New work lands on `main` first; it reaches members only when `release` is updated to match:
+
+```
+git checkout release && git merge --ff-only main && git push origin release && git checkout main
+```
+
+Protect it on GitHub: **Settings > Branches > Add branch ruleset** (or *Add rule*), target `release`, and turn on **Restrict updates** / **Restrict deletions** so only you can change it. Turn on **two-factor authentication** for your GitHub account as well: whoever controls the account controls what every member runs.
+
+To keep the server in step with the script, set the Worker's production branch to `release`: **Workers & Pages > torn-armory-notes > Settings > Build > Branch control > Production branch: `release`**.
 
 ## Day-to-day
 

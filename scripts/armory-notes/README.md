@@ -5,7 +5,7 @@ Attach a colored label and a note to individual weapons and armor. Notes are tie
 - **Faction notes** (Faction Armory): stored on your faction's own notes server, so every member using the script sees the same notes. Only editors chosen by the notes admin can edit them.
 - **Local notes** (Items page): private to you, stored only in this browser.
 
-**[Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/armory-notes/armory-notes.user.js)** (requires [Tampermonkey](https://www.tampermonkey.net/))
+**[Install](https://raw.githubusercontent.com/db7346/torn-userscripts/release/scripts/armory-notes/armory-notes.user.js)** (requires [Tampermonkey](https://www.tampermonkey.net/))
 
 ## Features
 
@@ -77,8 +77,8 @@ That is about **1 Torn API call per 12 hours**, and about **1.3 server requests 
 | Data storage | **This browser:** your local notes, your API key, your display choice, a sign-in token and a cache of faction notes. **Faction server (Cloudflare D1):** faction notes with the Torn player ID and name of whoever changed each one, and a change history; the faction armory's bonus weapons and armor (stats, bonuses, who they're loaned to, who lent them to the faction, sold / removed marks); trades logged by editors; and the editor list (player ID, name, who added them). **Your API key is not stored on the server.** |
 | Data sharing | Faction notes are visible to members of your faction who use this script, and to anyone the notes admin gives the view page link (a read-only web page of the armory list with notes, who items are loaned to, and who edited them). Nothing is shared with anyone else. |
 | Purpose of use | Annotating your own and your faction's items |
-| Key storage & sharing | Stored only in Tampermonkey storage. Sent over HTTPS, in the body of the sign-in request (about once every 12 hours), only to your faction's notes server. The server uses it for one Torn API call to confirm who you are and that you're in the faction, then forgets it. It is never stored, logged or put in a URL. |
-| Key access level | **Members: Public.** **Notes admin only:** one Limited key of their own, stored as a server secret (`ARMORY_API_KEY`), used for the armory sync (`faction/inventory`, `torn/itemdetails`) every 6 hours and about 15 minutes after a logged trade, and for the faction member list (`faction/members`) in Manage editors. All calls are tagged `comment=ArmoryNotes`. |
+| Key storage & sharing | Stored only in Tampermonkey storage. Sent over HTTPS, in the body of the sign-in request (about once every 12 hours), only to your faction's notes server. The server uses it for two Torn API calls (checking the key's access level, and confirming who you are and that you're in the faction), then forgets it. It is never stored, logged or put in a URL. |
+| Key access level | **Members: Public** is all that's needed (Minimal, Limited and Custom keys also work; **Full Access keys are refused**). **Notes admin only:** one Limited key of their own, stored as a server secret (`ARMORY_API_KEY`), used for the armory sync (`faction/inventory`, `torn/itemdetails`) every 6 hours and about 15 minutes after a logged trade, and for the faction member list (`faction/members`) in Manage editors. All calls are tagged `comment=ArmoryNotes`. |
 
 ## Known limitations
 
@@ -93,6 +93,7 @@ That is about **1 Torn API call per 12 hours**, and about **1.3 server requests 
 
 ## Changelog
 
+- **2.9.2**: Security update. Script updates now come from the **release** branch, so members only get versions that were published on purpose. The script can only contact your faction's own server. **Full Access keys are refused** at sign-in. Editors can only log trades they're part of. Server: a small **Activity** panel on the view page (notes, trades, borrowed and sold marks, editor changes, syncs; last 90 days) and a faster borrowed-items lookup. Needs migration `0008_activity.sql`.
 - **2.9.1**: Faction Armory **Deposit** list shows faction notes (read-only) on your items.
 - **2.9.0**: **Borrowed items:** editors tick **Borrowed from <lender>** on the lender's trade (or fill **Borrowed from** in the note editor). When the items go back they're hidden instead of "Missing", and they come back with their tags. **Editor tools… > Missing items** marks items **sold**, **removed** or **returned to owner**, many at once. Tooltips show "Borrowed from". The view page gets **Borrowed** and **Sold / removed** status filters. Needs migration `0007_borrowed_sold.sql`. Older scripts now see the update notice.
 - **2.8.3**: API key disclosure brought up to date: who runs the server, everything the server stores, the admin's Limited key, and the view page link. No change to how the script works.
