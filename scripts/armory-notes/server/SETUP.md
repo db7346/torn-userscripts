@@ -187,7 +187,7 @@ git checkout release && git merge --ff-only main && git push origin release && g
 
 Protect it on GitHub: **Settings > Branches > Add branch ruleset** (or *Add rule*), target `release`, and turn on **Restrict updates** / **Restrict deletions** so only you can change it. Turn on **two-factor authentication** for your GitHub account as well: whoever controls the account controls what every member runs.
 
-To keep the server in step with the script, set the Worker's production branch to `release`: **Workers & Pages > torn-armory-notes > Settings > Build > Branch control > Production branch: `release`**.
+The Worker's production branch is `release` too (**Workers & Pages > torn-armory-notes > Settings > Build > Production branch**), so the server and the script update together, only when `release` is updated. Pushes to `main` alone change nothing live.
 
 ## Day-to-day
 
