@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Effective Weapon Stats
 // @namespace    torn-userscripts
-// @version      5.0.2
+// @version      5.0.3
 // @description  Calculates effective Torn weapon stats on the item page using visible item data plus your Torn API perks, education, and merits.
 // @author       DadGum (based on work by BakedPotato [2889448])
 // @license      MIT
@@ -26,7 +26,7 @@
  * CREDITS AND LICENSE
  *   Based on Torn Effective Weapon Stats v4.9.0 by BakedPotato [2889448] (MIT).
  *   Released under the MIT license. The MIT permission notice is in this
- *   repository's LICENSE file.
+ *   script folder's LICENSE file.
  *
  * API KEY USAGE DISCLOSURE
  *   Data storage:        Key, computed bonuses, merit names, and ammo state, locally in Tampermonkey storage.
@@ -42,6 +42,9 @@
  *   Requests are tagged comment=EffectiveWeaponStats. Failures wait 5 minutes before retrying.
  *
  * CHANGELOG
+ *   5.0.3  Damage reduction perks no longer count as weapon damage.
+ *          Fist-only perks no longer count as damage on every weapon.
+ *          Sub-Machine gun perks no longer count as Machine Gun perks.
  *   5.0.2  The key field no longer triggers the browser's save password prompt.
  *   5.0.1  Specialist now counts toward Effective Damage, per the Torn wiki.
  *   5.0.0  Moved to one Torn API v2 request sent with the Authorization header.
@@ -618,11 +621,11 @@
         { re: /\brifle(s)?\b|\brifle weapon(s)?\b/, cat: "rifle" },
         { re: /\bpistol(s)?\b|\bpistol weapon(s)?\b/, cat: "pistol" },
         { re: /\bshotgun(s)?\b|\bshotgun weapon(s)?\b/, cat: "shotgun" },
-        { re: /\bsmg(s)?\b|\bsubmachine\b|\bsubmachine gun(s)?\b/, cat: "smg" },
+        { re: /\bsmg(s)?\b|\bsub[- ]?machine\b/, cat: "smg" },
         { re: /\btemporary weapon(s)?\b|\btemporary\b/, cat: "temporary" },
-        { re: /\bmachine[- ]?guns?\b/, cat: "machinegun" },
+        { re: /(?<!\bsub[- ]?)\bmachine[- ]?guns?\b/, cat: "machinegun" },
         { re: /\bheavy[- ]artillery\b/, cat: "heavyartillery" },
-        { re: /\bfist\b/, cat: "unsupported_fist" },
+        { re: /\bfists?\b/, cat: "unsupported_fist" },
         { re: /\bthroat\b/, cat: "unsupported_throat" }
     ];
 
@@ -1719,7 +1722,7 @@
                 if (!/\b(?:damage|accuracy|critical|hit chance|hit rate|hit increase)\b/i.test(raw)) continue;
                 // These affect the opponent, mitigation, or damage over time,
                 // rather than the outgoing direct-hit weapon stat.
-                if (/\b(?:opponent|enemy|incoming|mitigation|hospital|burning|poison|bleed)\b/i.test(raw)) continue;
+                if (/\b(?:opponent|enemy|incoming|mitigation|hospital|burning|poison|bleed|damage\s+(?:reduction|taken|received))\b/i.test(raw)) continue;
                 const scopes = getPerkScopes(raw);
                 if (!scopes.length) continue;
                 const conditional = /\b(?:when|while|if|against|below|above|first turn|during)\b/i.test(raw) &&

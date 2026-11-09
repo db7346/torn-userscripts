@@ -48,6 +48,7 @@ Every request is tagged `comment=EffectiveWeaponStats`. Failures wait 5 minutes 
 
 ## Changelog
 
+- **5.0.3**: Damage reduction and fist-only perks no longer count as weapon damage. Sub-Machine gun perks no longer count as Machine Gun perks.
 - **5.0.2**: The key field no longer triggers the browser's save password prompt.
 - **5.0.1**: Specialist now counts toward Effective Damage.
 - **5.0.0**: One Torn API v2 request sent with the Authorization header, last good data on failure with a retry cooldown, reduced page monitoring, key moved to Tampermonkey storage and a Settings panel, tighter selectors, and PDA support removed.
