@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Armory Notes
 // @namespace    dadgum.torn.armorynotes
-// @version      2.9.4
+// @version      2.9.5
 // @description  Colored labels and notes on individual weapons and armor (keyed by armory ID). Private notes on the Items page; shared faction notes in the Faction Armory.
 // @author       DadGum
 // @license      MIT
@@ -49,6 +49,8 @@
  * Author: DadGum
  *
  * Changelog
+ *   2.9.5 (2026-11-09) The key field no longer triggers the browser's save
+ *                      password prompt or shows the saved key in the page.
  *   2.9.4 (2026-11-07) Lender labels: items ticked "Borrowed from <lender>"
  *                      on a trade show a purple pill with the lender's name
  *                      on your Deposit, trade and Items pages until they
@@ -3359,8 +3361,11 @@ ${colorRules}
      */
     function openSignInDialog(reason = '') {
         const current = SettingsStore.get();
-        const keyInput = el('input', { attrs: { type: 'password', maxlength: '16', placeholder: '16-character Public key', autocomplete: 'off', spellcheck: 'false' } });
-        keyInput.value = current.apiKey;
+        const keyInput = el('input', { attrs: {
+            type: 'text', maxlength: '16', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false',
+            'data-lpignore': 'true', 'data-1p-ignore': 'true', style: '-webkit-text-security: disc',
+            placeholder: current.apiKey ? 'Key saved. Paste a new key to replace it.' : '16-character Public key',
+        } });
         const status = el('div', { cls: CLS.status, text: sessionStatusText() });
         const tagsBox = /** @type {HTMLInputElement} */ (el('input', { attrs: { type: 'checkbox' } }));
         tagsBox.checked = current.showEmptyTags;
@@ -3382,7 +3387,7 @@ ${colorRules}
          * @returns {Promise<void>}
          */
         const saveAndSignIn = async () => {
-            const apiKey = keyInput.value.trim();
+            const apiKey = keyInput.value.trim() || SettingsStore.get().apiKey;
             if (apiKey && !Data.isApiKeyFormat(apiKey)) {
                 status.textContent = 'An API key is 16 letters and numbers. Create a Public key in Torn: Settings > API Keys.';
                 return;
@@ -3434,6 +3439,7 @@ ${colorRules}
                     onClick: () => {
                         SettingsStore.set({ apiKey: '' });
                         keyInput.value = '';
+                        keyInput.placeholder = '16-character Public key';
                         Session.clear();
                         SharedStore.clear();
                         onSharingChanged();

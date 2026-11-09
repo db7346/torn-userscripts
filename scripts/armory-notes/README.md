@@ -94,6 +94,7 @@ That is about **1 Torn API call per 12 hours**, and about **1.3 server requests 
 
 ## Changelog
 
+- **2.9.5**: The key field no longer triggers the browser's save password prompt or shows the saved key in the page.
 - **2.9.4**: Lender labels. Items ticked "Borrowed from <lender>" on a trade show a dashed purple pill with the lender's name on your Deposit and Items pages, so they're easy to find and deposit. When they reach the armory they get a purple faction label with the lender's name; an existing note is never replaced. Unticking the trade removes labels nobody has edited.
 - **2.9.3**: **How it works** explains borrowed items (with a sample of the trade box) and Missing items; long dialogs scroll on small screens; the note editor's field is now just "Borrowed from". View page: TNL banner and title, shorter header.
 - **2.9.2**: Security update. Script updates now come from the **release** branch, so members only get versions that were published on purpose. The script can only contact your faction's own server. **Full Access keys are refused** at sign-in. Editors can only log trades they're part of. Server: a small **Activity** panel on the view page (notes, trades, borrowed and sold marks, editor changes, syncs; last 90 days) and a faster borrowed-items lookup. Needs migration `0008_activity.sql`.
