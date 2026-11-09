@@ -54,6 +54,7 @@ Torn requests are tagged `comment=OCHelper`. Failures wait 5 minutes before retr
 
 ## Changelog
 
+- **6.0.4**: A manual refresh always gets new data, the travel overview matches your faction's exact ID, and success chance lookups run at most three at a time.
 - **6.0.3**: The overview now hides when you leave the crimes tab.
 - **6.0.2**: The key field no longer triggers the browser's save password prompt.
 - **6.0.1**: Crime slot totals now include open slots in Recruiting crimes.

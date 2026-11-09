@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OC Helper
 // @namespace    torn-userscripts
-// @version      6.0.3
+// @version      6.0.4
 // @description  Overview of Organized Crimes 2.0: members not in crimes, members in each crime, and issues with any crimes. Also visible when flying.
 // @author       DadGum (based on work by callmericky [3299880])
 // @license      GPL-3.0-or-later
@@ -48,6 +48,9 @@
  *   Torn requests are tagged comment=OCHelper. Failures wait 5 minutes before retrying.
  *
  * CHANGELOG
+ *   6.0.4  A manual refresh now always gets new data, even if a load is already running.
+ *          The travel overview matches your faction's exact ID.
+ *          Success chance lookups run at most three at a time.
  *   6.0.3  The overview now hides when you leave the crimes tab.
  *   6.0.2  The key field no longer triggers the browser's save password prompt.
  *   6.0.1  Crime slot totals now include open slots in Recruiting crimes.
@@ -100,6 +103,7 @@
         LOCK_POLL_MS: 400,
         ELEMENT_WAIT_MS: 15000,
         TIMER_MS: 1000,
+        PROBABILITY_CONCURRENCY: 3,
         PAGE_SIZE: 100,
         MAX_COMPLETED_PAGES: 3,
         MAX_EXTRA_AVAILABLE_PAGES: 2,
@@ -587,6 +591,7 @@
     }
 
     let factionRequest = null;
+    let factionRequestForced = false;
 
     /**
      * Loads faction data, sharing one request within this tab.
@@ -595,7 +600,11 @@
      * @throws {ApiRequestError} When no data is available.
      */
     function loadFaction(force = false) {
+        if (factionRequest && force && !factionRequestForced) {
+            return factionRequest.catch(() => null).then(() => loadFaction(true));
+        }
         if (!factionRequest) {
+            factionRequestForced = force;
             factionRequest = loadFactionUncached(force).finally(() => {
                 factionRequest = null;
             });
@@ -1766,7 +1775,8 @@
         viewer.querySelectorAll(`.${cls('countdown')}`).forEach((element) => {
             const { text, highlight } = formatCountdown(Number(element.dataset.countdown), nowSec, showNegative);
             element.textContent = text;
-            element.className = cls('countdown', highlight);
+            const className = cls('countdown', highlight);
+            if (element.className !== className) element.className = className;
         });
     }
 
@@ -1850,7 +1860,8 @@
      * @returns {boolean} True on that faction's page.
      */
     function isOwnFactionPage(factionId) {
-        return window.location.href.includes(`ID=${factionId}`);
+        const match = window.location.href.match(/(?:[?&#/])ID=(\d+)/);
+        return Number(match?.[1]) === Number(factionId);
     }
 
     /**
@@ -1874,6 +1885,33 @@
     }
 
     /**
+     * Runs a task for each item with limited concurrency, collecting every outcome.
+     * @template T
+     * @param {T[]} items Items to process.
+     * @param {number} limit Maximum tasks running at once.
+     * @param {(item: T) => Promise<void>} task Task for one item.
+     * @returns {Promise<Array<{status: string}>>} One outcome per item.
+     */
+    async function settleWithLimit(items, limit, task) {
+        const results = [];
+        let next = 0;
+        const worker = async () => {
+            while (next < items.length) {
+                const index = next;
+                next += 1;
+                try {
+                    await task(items[index]);
+                    results[index] = { status: 'fulfilled' };
+                } catch (reason) {
+                    results[index] = { status: 'rejected', reason };
+                }
+            }
+        };
+        await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+        return results;
+    }
+
+    /**
      * Loads success chances in the background and redraws when they arrive.
      * @returns {Promise<void>} Resolves when lookups finish.
      */
@@ -1882,9 +1920,9 @@
         try {
             const scenarios = await loadScenarios();
             const crimes = view.model.planning.filter((crime) => scenarios.includes(crime.name));
-            const results = await Promise.allSettled(crimes.map(async (crime) => {
+            const results = await settleWithLimit(crimes, CONFIG.PROBABILITY_CONCURRENCY, async (crime) => {
                 view.probabilities[crime.id] = await loadCrimeProbability(crime);
-            }));
+            });
             view.probabilityError = results.some((result) => result.status === 'rejected')
                 ? 'Some success chances are unavailable from tornprobability.com.'
                 : '';
