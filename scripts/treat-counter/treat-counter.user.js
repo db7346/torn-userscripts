@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Treat Counter
 // @namespace    dadgum.torn.treats
-// @version      1.1.0
+// @version      1.1.1
 // @description  Live Halloween treat counter in the Torn sidebar, powered by the Torn API v2.
 // @author       DadGum (rewrite) — based on "Treat counter" by m0tch, Grizh, Silmaril (MIT)
 // @license      MIT
@@ -46,6 +46,8 @@
  *  tabs), plus at most 1 extra call per 15 s after an attack treat dialog.
  *
  *  Changelog
+ *   1.1.1  The key field no longer triggers the browser's save password prompt.
+ *          Settings opens by itself only on first run.
  *   1.1.0  Show only current treats. Removed the collected/goal display, the
  *          goal logic and the /torn/halloween call.
  *   1.0.1  Added GitHub update/download URLs for Tampermonkey auto-updates.
@@ -119,6 +121,7 @@
         LAST_FETCH: 'lastFetchAt',
         PAUSED_UNTIL: 'pausedUntil',
         BLOCKING_ERROR: 'blockingError',
+        SETTINGS_SHOWN: 'settingsShown',
         LEGACY_TORN_HALLOWEEN: 'cache:tornHalloween', // used by 1.0.x; removed at startup
     });
 
@@ -723,7 +726,12 @@
 
             const hasKey = Boolean(Storage.get(KEYS.API_KEY));
             const input = el('input', {
-                type: 'password',
+                type: 'text',
+                autocapitalize: 'off',
+                spellcheck: false,
+                'data-lpignore': 'true',
+                'data-1p-ignore': 'true',
+                style: '-webkit-text-security: disc',
                 placeholder: hasKey ? 'Key saved — paste a new one to replace' : 'Paste your API key (Minimal Access)',
                 autocomplete: 'off',
             });
@@ -974,7 +982,10 @@
 
         if (!Storage.get(KEYS.API_KEY)) {
             UI.setError('No API key set — click the counter to add one.');
-            Settings.open();
+            if (!Storage.get(KEYS.SETTINGS_SHOWN)) {
+                Storage.set(KEYS.SETTINGS_SHOWN, true);
+                Settings.open();
+            }
         }
 
         Poller.start();
