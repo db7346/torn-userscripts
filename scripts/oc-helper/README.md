@@ -54,6 +54,7 @@ Torn requests are tagged `comment=OCHelper`. Failures wait 5 minutes before retr
 
 ## Changelog
 
+- **6.0.3**: The overview now hides when you leave the crimes tab.
 - **6.0.2**: The key field no longer triggers the browser's save password prompt.
 - **6.0.1**: Crime slot totals now include open slots in Recruiting crimes.
 - **6.0.0**: Removed jQuery and PDA support, moved the key out of request URLs, added shared caching and last-good data on failure, fixed crashes and item name errors, added crime paging, fixed the sidebar notice, replaced the preferences page with a Settings panel, and added a third-party data disclosure.

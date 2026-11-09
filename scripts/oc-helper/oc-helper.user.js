@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OC Helper
 // @namespace    torn-userscripts
-// @version      6.0.2
+// @version      6.0.3
 // @description  Overview of Organized Crimes 2.0: members not in crimes, members in each crime, and issues with any crimes. Also visible when flying.
 // @author       DadGum (based on work by callmericky [3299880])
 // @license      GPL-3.0-or-later
@@ -48,6 +48,7 @@
  *   Torn requests are tagged comment=OCHelper. Failures wait 5 minutes before retrying.
  *
  * CHANGELOG
+ *   6.0.3  The overview now hides when you leave the crimes tab.
  *   6.0.2  The key field no longer triggers the browser's save password prompt.
  *   6.0.1  Crime slot totals now include open slots in Recruiting crimes.
  *   6.0.0  Removed jQuery and PDA support, and moved the key out of request URLs.
@@ -1268,7 +1269,7 @@
                 --tms-oc-icon-yellow: rgba(252,196,25,0.8); --tms-oc-icon-red: rgba(255,135,135,0.8);
                 --tms-oc-panel: #2b2b2b; --tms-oc-line: #555;
             }
-            .tms-oc-root .tms-oc-hidden { display: none !important; }
+            .tms-oc-root.tms-oc-hidden, .tms-oc-root .tms-oc-hidden { display: none !important; }
             ${V} .title-black { position: relative; }
             ${V} .tms-oc-extraSettingsButton { color: rgb(116,192,252); cursor: pointer; margin-left: 6px; }
             ${V} .tms-oc-extraSettingsButton:hover { color: rgb(252,196,25); }
