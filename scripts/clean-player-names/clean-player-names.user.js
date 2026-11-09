@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Clean Player Names
 // @namespace    http://tampermonkey.net/
-// @version      3.0.0
+// @version      3.0.1
 // @description  Replaces Torn's pixel honor bar names with a larger, more legible font, while maintaining color outlines for staff roles and those that opt to display blue name.
 // @author       DadGum [3158823]
 // @license      MIT
@@ -28,6 +28,7 @@
  *   The Storage, Cache, and API modules are omitted because this script uses none of them.
  *
  * CHANGELOG
+ *   3.0.1  Torn's own name image stays visible if a player's name cannot be read.
  *   3.0.0  Renamed from Torn: More Legible Player Names.
  *          Names and outlines now update when Torn reuses a name bar.
  *          Reads the name from Torn's name element, so other scripts' text cannot be picked up.
@@ -56,7 +57,7 @@
             Object.freeze({ className: 'helper', color: '#c080ff' }),
             Object.freeze({ className: 'blue', color: '#310AF5' }),
         ]),
-        CLASSES: Object.freeze({ TEXT: 'tms-lpn-text' }),
+        CLASSES: Object.freeze({ TEXT: 'tms-lpn-text', NO_NAME: 'tms-lpn-no-name' }),
         SELECTORS: Object.freeze({
             WRAP: '.honor-text-wrap',
             SPRITE: '.honor-text-svg',
@@ -135,7 +136,7 @@
                      1px  1px 0 ${outline} !important;
             }
 
-            ${CONFIG.SELECTORS.SPRITE} {
+            ${CONFIG.SELECTORS.WRAP}:not(.${CONFIG.CLASSES.NO_NAME}) ${CONFIG.SELECTORS.SPRITE} {
                 display: none !important;
             }
         `);
@@ -173,6 +174,7 @@
     function syncNameBar(wrap) {
         const name = readPlayerName(wrap);
         let element = findTextElement(wrap);
+        wrap.classList.toggle(CONFIG.CLASSES.NO_NAME, !name);
 
         if (!name) {
             element?.remove();

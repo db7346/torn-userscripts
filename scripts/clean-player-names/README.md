@@ -38,4 +38,5 @@ None. The script makes no Torn API calls and needs no API key.
 
 ## Changelog
 
+- **3.0.1**: Torn's own name image stays visible if a player's name cannot be read.
 - **3.0.0**: Renamed from Torn: More Legible Player Names. Names and outlines now update when Torn reuses a name bar, names can no longer pick up other scripts' text, page monitoring is debounced, class names are prefixed, and updates come from GitHub.
