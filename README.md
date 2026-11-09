@@ -9,6 +9,7 @@ Tampermonkey userscripts for [Torn City](https://www.torn.com).
 | [Armory Notes](scripts/armory-notes/) | Colored labels and notes on individual weapons and armor, by armory ID, shared with your faction | [Install](https://raw.githubusercontent.com/db7346/torn-userscripts/release/scripts/armory-notes/armory-notes.user.js) |
 | [Rental Manager](scripts/rental-manager/) | Queue of rentals needing attention, with prefilled lease extensions | [Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/rental-manager/rental-manager.user.js) |
 | [Treat Counter](scripts/treat-counter/) | Live Halloween treat counter in the sidebar | [Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/treat-counter/treat-counter.user.js) |
+| [Vault Withdraw Buttons](scripts/vault-withdraw-buttons/) | Preset and Paste buttons that fill the property vault withdrawal field | [Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/vault-withdraw-buttons/vault-withdraw-buttons.user.js) |
 
 ## Installing
 
