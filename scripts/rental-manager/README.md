@@ -55,6 +55,7 @@ Every request is tagged `comment=RentalManager` so it's identifiable in your key
 
 ## Changelog
 
+- **3.1.1**: The key field no longer triggers the browser's save password prompt, and Settings opens by itself only on first run.
 - **3.1.0**: Card shows only on the properties list and the extend/lease tabs (hidden on Vault and other option tabs).
 - **3.0.1**: Added GitHub update/download URLs for auto-updates.
 - **3.0.0**: Rewrite with API v2 (Limited key works), a single cached properties call, queue card UI, settings panel, no jQuery, hash routing, fill-once inputs and full API error handling.

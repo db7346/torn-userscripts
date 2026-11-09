@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Rental Manager
 // @namespace    dadgum.torn.rental-manager
-// @version      3.1.0
+// @version      3.1.1
 // @description  Queue of rental properties needing attention, one-click navigation, and auto-prefilled lease extensions. Torn API v2.
 // @author       DadGum (rewrite) — based on "Easy Property Rent Extension" by IceBlueFire [776] (MIT)
 // @license      MIT
@@ -53,6 +53,8 @@
  *   - /key/info         Only when saving a key
  *
  *  Changelog
+ *   3.1.1  The key field no longer triggers the browser's save password prompt.
+ *          Settings opens by itself only on first run.
  *   3.1.0  Card shows only on the properties list and the extend/lease tabs
  *          (hidden on Vault and other option tabs).
  *   3.0.1  Added GitHub update/download URLs for Tampermonkey auto-updates.
@@ -138,6 +140,7 @@
         PROPERTIES: 'cache:properties',
         LOG: 'cache:log',
         PAUSED_UNTIL: 'pausedUntil',
+        SETTINGS_SHOWN: 'settingsShown',
     });
     const FILLED_ATTR = `data-${P}-filled`;
 
@@ -1057,7 +1060,8 @@
             const access = Storage.get(KEYS.KEY_ACCESS);
 
             const keyInput = el('input', {
-                type: 'password', autocomplete: 'off',
+                type: 'text', autocomplete: 'off', autocapitalize: 'off', spellcheck: false,
+                'data-lpignore': 'true', 'data-1p-ignore': 'true', style: '-webkit-text-security: disc',
                 placeholder: access ? `Saved (${access}) — paste a new key to replace` : 'Paste your API key (Limited or Full)',
             });
             const numInput = (value) => el('input', { type: 'number', min: '0', step: '1', value: String(value) });
@@ -1376,7 +1380,10 @@
         window.addEventListener('hashchange', () => Router.handle());
 
         Router.handle();
-        if (!Storage.get(KEYS.API_KEY)) Settings.open();
+        if (!Storage.get(KEYS.API_KEY) && !Storage.get(KEYS.SETTINGS_SHOWN)) {
+            Storage.set(KEYS.SETTINGS_SHOWN, true);
+            Settings.open();
+        }
         await Card.load();
         Router.handle(); // re-run with data loaded (happy badge, highlight)
     }
