@@ -40,6 +40,7 @@ None. The script reads the vault page only and makes no network requests.
 
 ## Changelog
 
+- **6.0.1**: Presets may be separated by commas without spaces, misplaced commas are rejected, and awkward presets show the full number.
 - **6.0.0**: Added update and download URLs.
 - **5.0.0**: Removed the Magic button and the play money setting.
 - **4.0.1**: Presets now add to the current amount.

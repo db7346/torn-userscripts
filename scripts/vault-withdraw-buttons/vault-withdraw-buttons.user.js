@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vault Withdraw Buttons
 // @namespace    torn-userscripts
-// @version      6.0.0
+// @version      6.0.1
 // @description  Adds configurable withdraw presets and a Paste button to the Torn property vault.
 // @author       DadGum
 // @match        https://www.torn.com/properties.php*
@@ -34,6 +34,9 @@
  *   The API and Cache modules are omitted because this script makes no API calls.
  *
  * CHANGELOG
+ *   6.0.1  Presets may be separated by commas without spaces.
+ *          Amounts with misplaced commas, such as 1,5m, are now rejected.
+ *          Presets that do not shorten cleanly now show the full number.
  *   6.0.0  Added update and download URLs.
  *   5.0.0  Removed the Magic button and the play money setting.
  *   4.0.1  Presets now add to the current amount.
@@ -160,8 +163,9 @@
      * @returns {number|null} Whole dollars, or null when invalid.
      */
     function parseAmount(raw) {
-        const cleaned = String(raw ?? '').replace(/[\s,$]/g, '').toLowerCase();
-        const match = /^(\d+(?:\.\d+)?|\.\d+)([kmbt]?)$/.exec(cleaned);
+        const text = String(raw ?? '').replace(/[\s$]/g, '').toLowerCase();
+        if (text.includes(',') && !/^\d{1,3}(?:,\d{3})+(?:\.\d+)?[kmbt]?$/.test(text)) return null;
+        const match = /^(\d+(?:\.\d+)?|\.\d+)([kmbt]?)$/.exec(text.replace(/,/g, ''));
         if (!match) return null;
 
         const [, numberText, suffix] = match;
@@ -187,7 +191,7 @@
      */
     function formatCompact(amount) {
         for (const [suffix, unit] of [['b', 1e9], ['m', 1e6], ['k', 1e3]]) {
-            if (amount >= unit && amount % (unit / 1000) === 0) {
+            if (amount >= unit && amount % (unit / 100) === 0 && (suffix === 'b' || amount < unit * 1000)) {
                 return `${amount / unit}${suffix}`;
             }
         }
@@ -209,7 +213,10 @@
      * @returns {{presets: number[], error: string|null}} Parsed unique presets or an error.
      */
     function parsePresetList(text) {
-        const tokens = String(text).split(/[\s;]+|,(?=\s)/).map((token) => token.replace(/,$/, '')).filter(Boolean);
+        // A comma stays inside a token only when it is a thousands separator.
+        const tokens = String(text).split(/[\s;]+/)
+            .flatMap((chunk) => chunk.split(/(?<!\d),|,(?!\d{3}(?:,|$))/))
+            .filter(Boolean);
         if (!tokens.length) return { presets: [], error: 'Enter at least one preset.' };
 
         const presets = [];
