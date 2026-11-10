@@ -7,6 +7,7 @@ Tampermonkey userscripts for [Torn City](https://www.torn.com).
 | Script | Description | Install |
 |---|---|---|
 | [Armory Notes](scripts/armory-notes/) | Colored labels and notes on individual weapons and armor, by armory ID, shared with your faction | [Install](https://raw.githubusercontent.com/db7346/torn-userscripts/release/scripts/armory-notes/armory-notes.user.js) |
+| [Bounty Bullseye](scripts/bounty-bullseye/) | Bullseye on online and idle Enemies and Targets in the sidebar who have an active bounty | [Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/bounty-bullseye/bounty-bullseye.user.js) |
 | [BUSTR: Busting Reminder](scripts/bustr/) | How many busts you have left before getting jailed, plus a hardness-sorted jail list | [Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/bustr/bustr.user.js) |
 | [Clean Player Names](scripts/clean-player-names/) | Larger, more legible player names on honor bars | [Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/clean-player-names/clean-player-names.user.js) |
 | [Effective Weapon Stats](scripts/effective-weapon-stats/) | Effective damage, accuracy, and crit chance when you open a weapon | [Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/effective-weapon-stats/effective-weapon-stats.user.js) |
