@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BUSTR: Busting Reminder
 // @namespace    torn-userscripts
-// @version      2.1.0
+// @version      2.1.1
 // @description  Estimates how many busts you can do without getting jailed, and sorts the jail list by how hard each bust is.
 // @author       Adobi & Ironhydedragon (rewrite by DadGum [3158823])
 // @license      MIT
@@ -39,11 +39,13 @@
  *
  * REQUESTS (jail page only, tagged comment=BUSTR)
  *   GET /v2/user/log?log=5360&from=<72 hours ago>  Every 60 seconds (configurable) while the page is visible; shared across tabs
- *   GET /v2/user/log?log=5360                      Up to 1,000 past busts, once every 24 hours, for the threshold estimate
+ *   GET /v2/user/log?log=5360                      Your latest 100 busts, once every 24 hours, for the threshold estimate
  *   GET /v2/key/info                               Only when saving a key
  *   Usually 1-2 calls per minute while the jail page is open, and none elsewhere.
  *
  * CHANGELOG
+ *   2.1.1  The threshold is estimated from your most recent 100 busts, like the original,
+ *          so an old peak stops counting once it is that far back.
  *   2.1.0  Rows are shaded by your own past attempts: green if you have busted a harder target at
  *          a higher penalty, red if you were caught or failed on an easier one at a lower penalty.
  *   2.0.1  With two jail tabs open, a bust is no longer counted twice.
@@ -95,6 +97,7 @@
         }),
         LOG_PAGE_SIZE: 100,
         MAX_HISTORY_ENTRIES: 1000,
+        THRESHOLD_BUSTS: 100,
         HISTORY_TTL_MS: 24 * 60 * 60 * 1000,
         BACKOFF_MS: 60 * 1000,
         CONFIRM_DELAY_MS: 5000,
@@ -986,7 +989,7 @@
             const cached = Cache.get(K.HISTORY, CONFIG.HISTORY_TTL_MS);
             if (cached) return cached;
             try {
-                const history = await fetchBustLog({ maxEntries: CONFIG.MAX_HISTORY_ENTRIES });
+                const history = await fetchBustLog({ maxEntries: CONFIG.THRESHOLD_BUSTS });
                 Cache.set(K.HISTORY, history);
                 return history;
             } catch (error) {
@@ -1019,7 +1022,8 @@
                         ...recent.map((entry) => entry.timestamp),
                         ...this.pendingBusts.map((ms) => Math.floor(ms / 1000)),
                     ].sort((a, b) => b - a);
-                    const historyTimes = mergeEntries(history, recent).map((entry) => entry.timestamp);
+                    // The threshold only looks at your most recent busts, so old peaks age out.
+                    const historyTimes = mergeEntries(history, recent).slice(0, CONFIG.THRESHOLD_BUSTS).map((entry) => entry.timestamp);
                     this.stats = calcStats(recentTimes, historyTimes, Math.floor(Date.now() / 1000), getSettings().customThreshold);
                     this.error = null;
                 } catch (error) {

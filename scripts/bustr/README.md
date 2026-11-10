@@ -25,7 +25,7 @@ Shows how many busts you likely have left before getting jailed, above the jail 
 | Request | When | Key level |
 |---|---|---|
 | `GET /v2/user/log?log=5360&from=<72 hours ago>` | Every 60 seconds (configurable) while the jail page is visible | Full |
-| `GET /v2/user/log?log=5360` | Up to 1,000 past busts, once every 24 hours | Full |
+| `GET /v2/user/log?log=5360` | Your latest 100 busts, once every 24 hours | Full |
 | `GET /v2/key/info` | When saving a key | Any |
 
 Usually 1–2 calls per minute while the jail page is open, and none on other pages. Requests are tagged `comment=BUSTR`.
@@ -42,12 +42,13 @@ Usually 1–2 calls per minute while the jail page is open, and none on other pa
 
 ## Known limitations
 
-- The threshold is an estimate from your own bust history. Set a manual threshold in Settings if you know yours.
+- The threshold is an estimate from your most recent 100 busts. Set a manual threshold in Settings if you know yours.
 - The hardness score is a guide, not Torn's actual bust chance.
 - Shading only compares against your own past attempts (last 60 days), so it starts empty and fills in as you bust. Bust results are luck as well as skill, so treat it as a hint.
 
 ## Changelog
 
+- **2.1.1**: The threshold is estimated from your most recent 100 busts, like the original.
 - **2.1.0**: Rows are shaded by your own past bust attempts.
 - **2.0.1**: With two jail tabs open, a bust is no longer counted twice.
 - **2.0.0**: Rewrite. Jail page only, API v2 with the key in a header, all busts in the last 72 hours counted, threshold estimate fixes, a Settings panel, readable errors, shared caching, and no PDA support.
