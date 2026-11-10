@@ -10,6 +10,7 @@ Shows how many busts you likely have left before getting jailed, above the jail 
 - Red, orange, or green based on limits you set
 - Adds a bust to the count as soon as you see "You busted...", then confirms it from your log
 - A **hardness** score on each player (level × (hours left + 3)), with the list sorted easiest first
+- **Row shading learned from your own busts:** green if you've busted a harder target at a higher penalty, red if you were caught or failed on an easier one at a lower penalty, orange if your attempts disagree
 - Runs only on the jail page, pauses in hidden tabs, and shares data across tabs
 - Display only: you always click Bust yourself
 
@@ -17,7 +18,7 @@ Shows how many busts you likely have left before getting jailed, above the jail 
 
 1. Install the script and open the jail page.
 2. The Settings panel opens. Paste a **Full Access** API key and click **Save**.
-3. Change limits, refresh rate, a manual threshold, or the hardness switch any time from the **Settings** button on the bar or the Tampermonkey menu.
+3. Change limits, refresh rate, a manual threshold, or the hardness and shading switches any time from the **Settings** button on the bar or the Tampermonkey menu.
 
 ## API usage
 
@@ -33,7 +34,7 @@ Usually 1–2 calls per minute while the jail page is open, and none on other pa
 
 | | |
 |---|---|
-| Data storage | Key, settings, and bust log times, locally in Tampermonkey storage |
+| Data storage | Key, settings, bust log times, and your bust attempts (penalty and target hardness), locally in Tampermonkey storage |
 | Data sharing | None; requests go only to api.torn.com |
 | Purpose of use | Estimating how many busts you can do before getting jailed |
 | Key storage & sharing | Stored locally, sent only in the Authorization header, never logged |
@@ -43,9 +44,11 @@ Usually 1–2 calls per minute while the jail page is open, and none on other pa
 
 - The threshold is an estimate from your own bust history. Set a manual threshold in Settings if you know yours.
 - The hardness score is a guide, not Torn's actual bust chance.
+- Shading only compares against your own past attempts (last 60 days), so it starts empty and fills in as you bust. Bust results are luck as well as skill, so treat it as a hint.
 
 ## Changelog
 
+- **2.1.0**: Rows are shaded by your own past bust attempts.
 - **2.0.1**: With two jail tabs open, a bust is no longer counted twice.
 - **2.0.0**: Rewrite. Jail page only, API v2 with the key in a header, all busts in the last 72 hours counted, threshold estimate fixes, a Settings panel, readable errors, shared caching, and no PDA support.
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BUSTR: Busting Reminder
 // @namespace    torn-userscripts
-// @version      2.0.1
+// @version      2.1.0
 // @description  Estimates how many busts you can do without getting jailed, and sorts the jail list by how hard each bust is.
 // @author       Adobi & Ironhydedragon (rewrite by DadGum [3158823])
 // @license      MIT
@@ -30,7 +30,8 @@
  *   The penalty and threshold math comes from that script.
  *
  * API KEY USAGE DISCLOSURE
- *   Data storage:        Key, settings, and bust log times, locally in Tampermonkey storage.
+ *   Data storage:        Key, settings, bust log times, and your bust attempts (penalty and target hardness),
+ *                        locally in Tampermonkey storage.
  *   Data sharing:        None. Requests go only to api.torn.com.
  *   Purpose of use:      Estimating how many busts you can do before getting jailed.
  *   Key storage/sharing: Stored locally, sent only in the Authorization header to api.torn.com, never logged.
@@ -43,6 +44,8 @@
  *   Usually 1-2 calls per minute while the jail page is open, and none elsewhere.
  *
  * CHANGELOG
+ *   2.1.0  Rows are shaded by your own past attempts: green if you have busted a harder target at
+ *          a higher penalty, red if you were caught or failed on an easier one at a lower penalty.
  *   2.0.1  With two jail tabs open, a bust is no longer counted twice.
  *   2.0.0  Rewrite. Runs only on the jail page and uses API v2 with the key in a header.
  *          Reads every bust in the last 72 hours instead of only the newest 100 log entries.
@@ -72,6 +75,7 @@
             RECENT: 'recent_busts',
             HISTORY: 'bust_history',
             SETTINGS_SHOWN: 'settings_shown',
+            ATTEMPTS: 'attempts',
         }),
         LEGACY_KEYS: Object.freeze({ API_KEY: 'bustrApiKey', STATE: 'globalBustrState' }),
         DEFAULT_SETTINGS: Object.freeze({
@@ -80,6 +84,7 @@
             refreshSeconds: 60,
             customThreshold: 0,
             showHardness: true,
+            showShading: true,
         }),
         MIN_REFRESH_SECONDS: 30,
         PENALTY: Object.freeze({
@@ -107,6 +112,11 @@
             CONFIRM_BUST: '.confirm-bust',
         }),
         BUST_SUCCESS: /^\s*You busted\b/i,
+        BUST_CAUGHT: /you were caught and put in jail yourself/i,
+        BUST_FAILED: /\bfailed\b/i,
+        ATTEMPTS_MAX: 2000,
+        ATTEMPTS_MAX_AGE_S: 60 * 24 * 60 * 60,
+        FORGET_CONFIRM_MS: 4000,
         IDS: Object.freeze({ BAR: 'tms-bustr-bar', SETTINGS: 'tms-bustr-settings' }),
         CLASSES: Object.freeze({
             SORTED: 'tms-bustr-sorted',
@@ -115,6 +125,9 @@
             ORANGE: 'tms-bustr-orange',
             RED: 'tms-bustr-red',
             ERROR: 'tms-bustr-error',
+            LIKELY: 'tms-bustr-likely',
+            RISKY: 'tms-bustr-risky',
+            MIXED: 'tms-bustr-mixed',
         }),
         API_ERROR_MESSAGES: Object.freeze({
             0: "Torn's API had an unknown error. Try again shortly.",
@@ -207,7 +220,7 @@
 
     /**
      * Reads settings, filling in defaults and correcting invalid values.
-     * @returns {{redLimit: number, greenLimit: number, refreshSeconds: number, customThreshold: number, showHardness: boolean}} Settings.
+     * @returns {{redLimit: number, greenLimit: number, refreshSeconds: number, customThreshold: number, showHardness: boolean, showShading: boolean}} Settings.
      */
     function getSettings() {
         const saved = { ...CONFIG.DEFAULT_SETTINGS, ...Storage.get(K.SETTINGS, {}) };
@@ -219,6 +232,7 @@
             refreshSeconds: Math.max(CONFIG.MIN_REFRESH_SECONDS, number(saved.refreshSeconds, defaults.refreshSeconds, 0)),
             customThreshold: number(saved.customThreshold, 0, 0),
             showHardness: saved.showHardness !== false,
+            showShading: saved.showShading !== false,
         };
     }
 
@@ -238,6 +252,27 @@
         } catch (error) {
             log('Legacy storage migration skipped', error);
         }
+    }
+
+    /**
+     * Reads saved bust attempts.
+     * @returns {Array<{t: number, p: number, h: number, ok: boolean}>} Attempts: time (s), penalty, hardness, success.
+     */
+    function getAttempts() {
+        const saved = Storage.get(K.ATTEMPTS, []);
+        return Array.isArray(saved) ? saved : [];
+    }
+
+    /**
+     * Saves one bust attempt, dropping old and excess entries.
+     * @param {{t: number, p: number, h: number, ok: boolean}} attempt Attempt.
+     * @returns {void}
+     */
+    function addAttempt(attempt) {
+        const cutoff = attempt.t - CONFIG.ATTEMPTS_MAX_AGE_S;
+        const kept = getAttempts().filter((entry) => entry.t >= cutoff);
+        kept.push(attempt);
+        Storage.set(K.ATTEMPTS, kept.slice(-CONFIG.ATTEMPTS_MAX));
     }
 
     // =========================================================================
@@ -536,6 +571,34 @@
         return Math.floor(level * (hours + CONFIG.HARDNESS_HOUR_OFFSET));
     }
 
+    /**
+     * Judges a target from your past attempts.
+     * @param {number} hardness Target hardness.
+     * @param {number} penalty Your current penalty.
+     * @param {Array<{p: number, h: number, ok: boolean}>} attempts Past attempts.
+     * @returns {'likely'|'risky'|'mixed'|null} Likely when you busted a harder target at a higher penalty,
+     *     risky when you were caught or failed on an easier target at a lower penalty, mixed when both, null when neither.
+     */
+    function classifyTarget(hardness, penalty, attempts) {
+        const likely = attempts.some((a) => a.ok && a.p >= penalty && a.h >= hardness);
+        const risky = attempts.some((a) => !a.ok && a.p <= penalty && a.h <= hardness);
+        if (likely && risky) return 'mixed';
+        if (likely) return 'likely';
+        return risky ? 'risky' : null;
+    }
+
+    /**
+     * Works out a bust result from its confirmation text.
+     * @param {string} text Confirmation text.
+     * @returns {'success'|'caught'|'failed'|null} Result, or null when it is not a result.
+     */
+    function parseBustResult(text) {
+        if (CONFIG.BUST_SUCCESS.test(text)) return 'success';
+        if (CONFIG.BUST_CAUGHT.test(text)) return 'caught';
+        if (CONFIG.BUST_FAILED.test(text)) return 'failed';
+        return null;
+    }
+
     // =========================================================================
     // UI
     // =========================================================================
@@ -564,7 +627,7 @@
      */
     function injectStyles() {
         const { BAR, SETTINGS } = CONFIG.IDS;
-        const { SORTED, HARDNESS, GREEN, ORANGE, RED, ERROR } = CONFIG.CLASSES;
+        const { SORTED, HARDNESS, GREEN, ORANGE, RED, ERROR, LIKELY, RISKY, MIXED } = CONFIG.CLASSES;
         GM_addStyle(`
             #${BAR} { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0 0 6px; padding: 7px 10px; border-radius: 5px; background: #2a2a2a; color: #ddd; font-size: 13px; border-left: 4px solid #777; }
             #${BAR}.${GREEN} { border-left-color: #85b200; }
@@ -579,6 +642,9 @@
             #${BAR} button { padding: 2px 8px; border-radius: 4px; border: 1px solid #555; background: #333; color: #ddd; cursor: pointer; font-size: 11px; }
             #${BAR} .${ERROR} { color: #ff8a80; }
             .${SORTED} { display: flex !important; flex-direction: column; }
+            li.${LIKELY} { background: rgba(133, 178, 0, 0.18) !important; }
+            li.${RISKY} { background: rgba(230, 77, 26, 0.18) !important; }
+            li.${MIXED} { background: rgba(208, 128, 0, 0.18) !important; }
             .${HARDNESS} { display: inline-block; min-width: 34px; margin-right: 6px; padding: 0 4px; border-radius: 3px; background: #444; color: #fff; font-size: 10px; font-weight: 700; text-align: center; }
             #${SETTINGS} { position: fixed; z-index: 100000; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.6); }
             .tms-bustr-panel { box-sizing: border-box; width: 440px; max-width: 94vw; padding: 16px; border-radius: 6px; background: #1b1b1b; color: #e6e6e6; font-size: 13px; line-height: 1.4; }
@@ -604,7 +670,8 @@
 
     /**
      * Fills the bar with stats or a message.
-     * @param {{stats?: {penalty: number, threshold: number, available: number}, message?: string, error?: Error, sorted?: boolean}} view What to show.
+     * @param {{stats?: {penalty: number, threshold: number, available: number}, message?: string, error?: Error, sorted?: boolean, shading?: number}} view What to show.
+     *     shading is the number of learned attempts, when shading is on.
      * @returns {void}
      */
     function renderBar(view) {
@@ -627,6 +694,13 @@
         if (view.message) children.push(createEl('span', { className: 'tms-bustr-detail', text: view.message }));
         if (view.error) children.push(createEl('span', { className: ERROR, text: view.error.message || String(view.error) }));
         if (view.sorted) children.push(createEl('span', { className: 'tms-bustr-detail', text: 'Sorted by hardness, easiest first' }));
+        if (view.shading !== undefined) {
+            const count = view.shading;
+            const text = count
+                ? `Shading from ${count} attempt${count === 1 ? '' : 's'}: green likely, red risky, orange mixed`
+                : 'Shading starts after your first busts';
+            children.push(createEl('span', { className: 'tms-bustr-detail', text }));
+        }
         children.push(
             createEl('span', { className: 'tms-bustr-spacer' }),
             createEl('button', { text: 'Settings', attrs: { type: 'button' }, onClick: openSettings }),
@@ -648,39 +722,72 @@
     }
 
     /**
-     * Adds hardness scores and sorts the list, or removes them when turned off.
-     * @param {boolean} enabled Whether hardness is on.
+     * Reads a row's hardness.
+     * @param {Element} row Player row.
+     * @returns {number|null} Hardness, or null when the row cannot be read.
+     */
+    function rowHardness(row) {
+        const values = readRow(row);
+        return values ? calcHardness(values.level, values.hours) : null;
+    }
+
+    /**
+     * Adds or removes one row's hardness badge and sort position.
+     * @param {Element} row Player row.
+     * @param {number|null} score Hardness, or null to remove.
+     * @returns {boolean} True when the row was given a position.
+     */
+    function syncBadge(row, score) {
+        const { INFO, REASON } = CONFIG.SELECTORS;
+        const { HARDNESS } = CONFIG.CLASSES;
+        const target = row.querySelector(`${INFO} ${REASON}`);
+        let badge = target?.querySelector(`.${HARDNESS}`);
+        if (score === null || !target) {
+            badge?.remove();
+            row.style.removeProperty('order');
+            return false;
+        }
+        if (!badge) {
+            badge = createEl('span', { className: HARDNESS, attrs: { title: 'Hardness: level × (hours left + 3). Lower is easier.' } });
+            target.prepend(badge);
+        }
+        if (badge.textContent !== String(score)) badge.textContent = String(score);
+        if (row.style.order !== String(score)) row.style.order = String(score);
+        return true;
+    }
+
+    /**
+     * Sets one row's tint.
+     * @param {Element} row Player row.
+     * @param {'likely'|'risky'|'mixed'|null} verdict Verdict, or null for no tint.
+     * @returns {void}
+     */
+    function syncTint(row, verdict) {
+        const { LIKELY, RISKY, MIXED } = CONFIG.CLASSES;
+        const wanted = { likely: LIKELY, risky: RISKY, mixed: MIXED }[verdict];
+        [LIKELY, RISKY, MIXED].forEach((name) => {
+            if (row.classList.contains(name) !== (name === wanted)) row.classList.toggle(name, name === wanted);
+        });
+    }
+
+    /**
+     * Applies hardness badges, sorting, and tints to the jail list.
+     * @param {{showHardness: boolean, penalty: (number|null), attempts: (Array|null)}} options What to show; attempts null turns tints off.
      * @returns {boolean} True when the list was sorted.
      */
-    function syncHardness(enabled) {
-        const { LIST, ROW, INFO, REASON } = CONFIG.SELECTORS;
-        const { SORTED, HARDNESS } = CONFIG.CLASSES;
+    function syncRows({ showHardness, penalty, attempts }) {
+        const { LIST, ROW } = CONFIG.SELECTORS;
         const list = document.querySelector(LIST);
         if (!list) return false;
 
-        if (!enabled) {
-            list.classList.remove(SORTED);
-            list.querySelectorAll(`.${HARDNESS}`).forEach((badge) => badge.remove());
-            list.querySelectorAll(ROW).forEach((row) => row.style.removeProperty('order'));
-            return false;
-        }
-
         let sortedAny = false;
         list.querySelectorAll(ROW).forEach((row) => {
-            const values = readRow(row);
-            const target = row.querySelector(`${INFO} ${REASON}`);
-            if (!values || !target) return;
-            const score = calcHardness(values.level, values.hours);
-            let badge = target.querySelector(`.${HARDNESS}`);
-            if (!badge) {
-                badge = createEl('span', { className: HARDNESS, attrs: { title: 'Hardness: level × (hours left + 3). Lower is easier.' } });
-                target.prepend(badge);
-            }
-            if (badge.textContent !== String(score)) badge.textContent = String(score);
-            if (row.style.order !== String(score)) row.style.order = String(score);
-            sortedAny = true;
+            const score = rowHardness(row);
+            if (syncBadge(row, showHardness ? score : null)) sortedAny = true;
+            const verdict = attempts && penalty !== null && score !== null ? classifyTarget(score, penalty, attempts) : null;
+            syncTint(row, verdict);
         });
-        list.classList.toggle(SORTED, sortedAny);
+        list.classList.toggle(CONFIG.CLASSES.SORTED, sortedAny);
         return sortedAny;
     }
 
@@ -696,6 +803,7 @@
             refreshSeconds: Number(fields.refreshSeconds.value),
             customThreshold: Number(fields.customThreshold.value),
             showHardness: fields.showHardness.checked,
+            showShading: fields.showShading.checked,
         });
     }
 
@@ -764,8 +872,26 @@
         const custom = numberField('Manual threshold (0 = estimate it)', settings.customThreshold, 0);
         const hardness = createEl('input', { attrs: { type: 'checkbox' } });
         hardness.checked = settings.showHardness;
+        const shading = createEl('input', { attrs: { type: 'checkbox' } });
+        shading.checked = settings.showShading;
         const status = createEl('div', { attrs: { role: 'status' } });
-        const fields = { redLimit: red.input, greenLimit: green.input, refreshSeconds: refresh.input, customThreshold: custom.input, showHardness: hardness };
+        const fields = { redLimit: red.input, greenLimit: green.input, refreshSeconds: refresh.input, customThreshold: custom.input, showHardness: hardness, showShading: shading };
+        let forgetArmedUntil = 0;
+        const forget = createEl('button', {
+            text: `Forget learned attempts (${getAttempts().length})`,
+            attrs: { type: 'button' },
+            onClick: () => {
+                if (Date.now() > forgetArmedUntil) {
+                    forgetArmedUntil = Date.now() + CONFIG.FORGET_CONFIRM_MS;
+                    status.textContent = 'Click Forget again within a few seconds to delete your learned attempts.';
+                    return;
+                }
+                Storage.remove(K.ATTEMPTS);
+                forget.textContent = 'Forget learned attempts (0)';
+                status.textContent = 'Learned attempts deleted.';
+                Controller.render();
+            },
+        });
 
         const close = () => overlay.remove();
         const save = async () => {
@@ -789,6 +915,7 @@
                 refresh.label,
                 custom.label,
                 createEl('label', {}, ['Show hardness and sort the list', hardness]),
+                createEl('label', {}, ['Shade rows by your past attempts', shading]),
                 createEl('button', { text: 'Save', attrs: { type: 'button' }, onClick: save }),
                 createEl('button', {
                     text: 'Remove key',
@@ -801,6 +928,7 @@
                         Controller.restart(true);
                     },
                 }),
+                forget,
                 createEl('button', { text: 'Close', attrs: { type: 'button' }, onClick: close }),
                 status,
             ]),
@@ -910,15 +1038,34 @@
          * @returns {void}
          */
         render() {
-            renderBar({ stats: this.stats ?? undefined, error: this.error ?? undefined, sorted: this.sorted() });
+            const shading = getSettings().showShading && this.stats ? getAttempts().length : undefined;
+            renderBar({ stats: this.stats ?? undefined, error: this.error ?? undefined, sorted: this.sorted(), shading });
         },
 
         /**
-         * Applies hardness to the current list.
+         * Applies hardness badges, sorting, and tints to the current list.
          * @returns {boolean} True when sorted.
          */
         sorted() {
-            return syncHardness(getSettings().showHardness);
+            const settings = getSettings();
+            return syncRows({
+                showHardness: settings.showHardness,
+                penalty: this.stats?.penalty ?? null,
+                attempts: settings.showShading ? getAttempts() : null,
+            });
+        },
+
+        /**
+         * Saves a bust attempt seen on the page, using the penalty from just before it.
+         * @param {Element} confirm The row's confirmation element.
+         * @param {boolean} ok True for a successful bust.
+         * @returns {void}
+         */
+        recordAttempt(confirm, ok) {
+            const row = confirm.closest('li');
+            const hardness = row ? rowHardness(row) : null;
+            if (!this.stats || hardness === null) return;
+            addAttempt({ t: Math.floor(Date.now() / 1000), p: this.stats.penalty, h: hardness, ok });
         },
 
         /**
@@ -954,8 +1101,8 @@
     // OBSERVERS
     // =========================================================================
 
-    /** @type {WeakSet<Element>} Bust confirmations already counted. */
-    const countedConfirmations = new WeakSet();
+    /** @type {WeakMap<Element, string>} The last result counted for each confirmation element. */
+    const countedConfirmations = new WeakMap();
     let pageTimer = 0;
 
     /**
@@ -969,7 +1116,7 @@
     }
 
     /**
-     * Counts any newly shown "You busted" confirmation once.
+     * Counts each newly shown bust result once: successes update the count, and every result is learned.
      * @param {MutationRecord[]} mutations Page changes.
      * @returns {void}
      */
@@ -981,13 +1128,16 @@
             if (confirm) confirms.add(confirm);
         });
         confirms.forEach((confirm) => {
-            const success = CONFIG.BUST_SUCCESS.test(confirm.textContent || '');
-            if (success && !countedConfirmations.has(confirm)) {
-                countedConfirmations.add(confirm);
-                Controller.recordBust();
-            } else if (!success) {
+            const text = (confirm.textContent || '').trim();
+            const result = parseBustResult(text);
+            if (!result) {
                 countedConfirmations.delete(confirm);
+                return;
             }
+            if (countedConfirmations.get(confirm) === text) return;
+            countedConfirmations.set(confirm, text);
+            Controller.recordAttempt(confirm, result === 'success');
+            if (result === 'success') Controller.recordBust();
         });
     }
 
