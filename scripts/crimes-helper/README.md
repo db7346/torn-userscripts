@@ -7,7 +7,7 @@ Helpers for the Crimes 2.0 pages: market links on items you're missing, an enhan
 ## Features
 
 - **Market links:** items you have none of get a small, faint cart icon in the tile's corner (full brightness when you hover the tile) that opens that item on the item market in a new tab. The badge sits beside Torn's Add button, so clicking it never adds anything.
-- **Enhancer check:** the crime title shows ✅ when you own that crime's enhancer, or a red link to the market when you don't.
+- **Enhancer check:** the crime title shows ✅ when you own that crime's enhancer, or a red link to the market when you don't. It reads Torn's own enhancer label from the crime's stats, so it works in any browser and without TornTools.
 - **Guide link:** the crime's in-depth forum guide, in the header.
 - **Crime chain counter:** success +1, failure halves it, critical failure resets it to 0. It reads the crime results Torn already sends your browser, so it needs no key, makes no API calls and doesn't need TornTools.
 - **Optional log catch-up:** with a Full Access key, the counter also counts crimes done on other devices or with the page closed, and the ↻ button rebuilds it from your crime log.
@@ -51,6 +51,7 @@ Without a key: no requests at all. With one: about 1 call per page load. Request
 
 ## Changelog
 
+- **2.1.0**: The enhancer check reads Torn's own "Enhancer: …, owned" label, so it works in any browser and without TornTools.
 - **2.0.0**: Rewrite. Market links work again and sit beside Torn's Add button instead of inside it. Reads Torn's crime results itself, so TornTools is optional. The enhancer check can't crash before your enhancer is known. API v2 with the key in a header, Tampermonkey storage, catch-up reads only new logs, and a Settings panel with a key check. Arson added (guide, enhancer, and market links in its item picker).
 
 ## Credits

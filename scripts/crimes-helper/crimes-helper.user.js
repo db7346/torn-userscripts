@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Crimes Helper
 // @namespace    dadgum.torn.crimes-helper
-// @version      2.0.0
+// @version      2.1.0
 // @description  Crimes 2.0 helper: market links on items you are missing, an enhancer check, forum guide links, and a crime chain counter. Works without TornTools; the API key is optional.
 // @author       TiltGod5000 (rewrite by DadGum [3158823])
 // @license      MIT
@@ -53,6 +53,8 @@
  *   Without a key: no requests at all.
  *
  * CHANGELOG
+ *   2.1.0  Enhancer check reads Torn's own "Enhancer: ..., owned" label from the crime's stats, so
+ *          it works in any browser and without TornTools; the response reader is the fallback.
  *   2.0.0  Rewrite. Market links work again (Torn renamed the empty-item class) and sit beside
  *          Torn's Add button instead of inside it. Reads Torn's crime results itself, so the
  *          enhancer check and counter no longer need TornTools. Enhancer check can't crash before
@@ -119,6 +121,8 @@
             HEADER_RULE: '.crimes-app > hr',
             TORN_LINK: '[class*="link_"]',
             CRIME_TITLE: '.crime-root [class*="title__"]',
+            /** Torn's stats button, labelled "Enhancer: Magnifying Glass, owned" or "..., not owned". */
+            ENHANCER_LABEL: '.crime-root [aria-label^="Enhancer:"]',
             MISSING_ITEM: 'img[class*="silhouetteImage"]',
             /** The tile's Add button when it has one (the badge goes beside it), else the tile itself. */
             TILE_BUTTON: 'button',
@@ -612,6 +616,16 @@
     }
 
     /**
+     * Reads Torn's enhancer label.
+     * @param {string} label aria-label such as "Enhancer: Magnifying Glass, owned".
+     * @returns {?{name: string, available: boolean}} Enhancer, or null when the label doesn't match.
+     */
+    function parseEnhancerLabel(label) {
+        const match = /^\s*Enhancer:\s*(.+?),\s*(not owned|owned)\s*$/i.exec(String(label || ''));
+        return match ? { name: match[1], available: match[2].toLowerCase() === 'owned' } : null;
+    }
+
+    /**
      * Formats the chain like 1.0.0 (two decimals, since failures halve it).
      * @param {number} chain Chain.
      * @returns {string} Text.
@@ -991,8 +1005,9 @@
     }
 
     /**
-     * Shows whether you own the current crime's enhancer, next to the crime title.
-     * Nothing is shown until Torn has sent your enhancer for this crime.
+     * Shows whether you own the current crime's enhancer, next to the crime title. Reads Torn's
+     * own label in the crime's stats first (any browser, no TornTools); falls back to the enhancer
+     * from Torn's crimes response. Nothing is shown until one of them is known for this crime.
      * @returns {void}
      */
     function renderEnhancer() {
@@ -1000,7 +1015,8 @@
         if (!title) return;
         const crimeKey = crimeKeyFromHash(location.hash);
         const crime = CONFIG.CRIMES[crimeKey];
-        const info = Enhancer.current?.crime === crimeKey ? Enhancer.current : null;
+        const fromLabel = parseEnhancerLabel(document.querySelector(S.ENHANCER_LABEL)?.getAttribute('aria-label'));
+        const info = fromLabel || (Enhancer.current?.crime === crimeKey ? Enhancer.current : null);
         const existing = title.querySelector('.tms-ch-enhancer');
         if (!crime || !info) {
             existing?.remove();
@@ -1304,8 +1320,8 @@
      */
     function watchApp(root) {
         const redraw = throttle(() => renderAll(root), CONFIG.OBSERVER_THROTTLE_MS);
-        // class/src changes too: Torn may swap the greyed-out image in place once you own the item.
-        new MutationObserver(redraw).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'src'] });
+        // class/src/label changes too: Torn may swap the greyed-out image or the enhancer label in place.
+        new MutationObserver(redraw).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'src', 'aria-label'] });
         window.addEventListener('hashchange', redraw);
         return redraw;
     }
