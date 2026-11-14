@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Crimes Helper
 // @namespace    dadgum.torn.crimes-helper
-// @version      2.1.0
+// @version      2.1.1
 // @description  Crimes 2.0 helper: market links on items you are missing, an enhancer check, forum guide links, and a crime chain counter. Works without TornTools; the API key is optional.
 // @author       TiltGod5000 (rewrite by DadGum [3158823])
 // @license      MIT
@@ -53,6 +53,9 @@
  *   Without a key: no requests at all.
  *
  * CHANGELOG
+ *   2.1.1  Firefox: page requests no longer fail with "Permission denied to access property
+ *          'length'". Torn's fetch is called with Reflect.apply, callbacks the page runs are
+ *          shared with exportFunction, and errors while reading a response can't reach Torn.
  *   2.1.0  Enhancer check reads Torn's own "Enhancer: ..., owned" label from the crime's stats, so
  *          it works in any browser and without TornTools; the response reader is the fallback.
  *   2.0.0  Rewrite. Market links work again (Torn renamed the empty-item class) and sit beside
@@ -634,6 +637,16 @@
         return chain.toFixed(2);
     }
 
+    /**
+     * Makes a script function callable by the page. Firefox only lets page code call functions
+     * shared with exportFunction; other browsers don't need it.
+     * @param {Function} fn Function.
+     * @returns {Function} Function the page may call.
+     */
+    function toPage(fn) {
+        return typeof exportFunction === 'function' ? exportFunction(fn, pageWindow) : fn;
+    }
+
     // =========================================================================
     // INTERCEPT (reads Torn's crime responses; never changes them)
     // =========================================================================
@@ -681,39 +694,74 @@
         },
 
         /**
-         * Reads a copy of one response body. Torn's own copy is untouched.
+         * Reads a copy of one response body. Torn's own copy is untouched. Uses promise callbacks
+         * instead of await: in Firefox the response and its promises belong to the page, and the
+         * page may only call back into the script through functions shared with toPage().
          * @param {Response} response Page fetch response.
-         * @returns {Promise<void>} Resolves when read.
+         * @returns {void}
          */
-        async inspect(response) {
+        inspect(response) {
             try {
-                if (!/json/i.test(response?.headers?.get?.('content-type') || '')) return;
-                this.deliver(await response.clone().json(), 'page');
+                if (!/json/i.test(String(response?.headers?.get?.('content-type') || ''))) return;
+                response.clone().json().then(
+                    toPage((json) => this.safeDeliver(json, 'page')),
+                    toPage((error) => log('Could not read a response:', String(error?.message || error))),
+                );
             } catch (error) {
                 log('Could not read a response:', error?.message);
             }
         },
 
         /**
+         * deliver() that never throws, so a Firefox permission error reading page data can't escape.
+         * @param {*} json Parsed body.
+         * @param {string} source Reader name.
+         * @returns {void}
+         */
+        safeDeliver(json, source) {
+            try {
+                this.deliver(json, source);
+            } catch (error) {
+                log('Could not read crime data from', source, error?.message);
+            }
+        },
+
+        /**
          * Wraps the page's fetch so responses can be read, and listens to TornTools as a fallback.
-         * Must run at document-start, before Torn loads the first crime.
+         * Must run at document-start, before Torn loads the first crime. Torn's request is always
+         * made exactly as asked: Reflect.apply reads the argument list on the script's side (in
+         * Firefox the page's own apply may not read the script's array, which broke page requests
+         * in 2.1.0), and anything that goes wrong while reading the response is caught.
          * @returns {void}
          */
         install() {
             try {
                 const original = pageWindow.fetch;
                 if (typeof original !== 'function') throw new Error('fetch not found');
-                const self = this;
+                const onResponse = toPage((response) => {
+                    this.inspect(response);
+                });
+                const ignore = toPage(() => {});
                 const wrapped = function (...args) {
-                    const promise = original.apply(pageWindow, args);
-                    promise.then((response) => self.inspect(response), () => {});
+                    const promise = Reflect.apply(original, pageWindow, args);
+                    try {
+                        promise.then(onResponse, ignore);
+                    } catch (error) {
+                        log('Could not watch a request:', error?.message);
+                    }
                     return promise;
                 };
-                pageWindow.fetch = typeof exportFunction === 'function' ? exportFunction(wrapped, pageWindow) : wrapped;
+                pageWindow.fetch = toPage(wrapped);
             } catch (error) {
                 console.warn('[CH] Could not read page requests; relying on TornTools if installed.', error?.message);
             }
-            pageWindow.addEventListener(CONFIG.TORNTOOLS_EVENT, (event) => this.deliver(event?.detail?.json, 'torntools'));
+            pageWindow.addEventListener(CONFIG.TORNTOOLS_EVENT, (event) => {
+                try {
+                    this.safeDeliver(event?.detail?.json, 'torntools');
+                } catch (error) {
+                    log('Could not read the TornTools event:', error?.message);
+                }
+            });
         },
     };
 

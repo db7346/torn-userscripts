@@ -51,6 +51,7 @@ Without a key: no requests at all. With one: about 1 call per page load. Request
 
 ## Changelog
 
+- **2.1.1**: Firefox fix: page requests no longer fail with "Permission denied to access property 'length'". Errors while reading a response can no longer affect Torn's own requests.
 - **2.1.0**: The enhancer check reads Torn's own "Enhancer: …, owned" label, so it works in any browser and without TornTools.
 - **2.0.0**: Rewrite. Market links work again and sit beside Torn's Add button instead of inside it. Reads Torn's crime results itself, so TornTools is optional. The enhancer check can't crash before your enhancer is known. API v2 with the key in a header, Tampermonkey storage, catch-up reads only new logs, and a Settings panel with a key check. Arson added (guide, enhancer, and market links in its item picker).
 
