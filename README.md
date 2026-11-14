@@ -6,7 +6,6 @@ Tampermonkey userscripts for [Torn City](https://www.torn.com).
 
 | Script | Description | Install |
 |---|---|---|
-| [Armory Notes](scripts/armory-notes/) | Colored labels and notes on individual weapons and armor, by armory ID, shared with your faction | [Install](https://raw.githubusercontent.com/db7346/torn-userscripts/release/scripts/armory-notes/armory-notes.user.js) |
 | [Bounty Bullseye](scripts/bounty-bullseye/) | Bullseye on online and idle Enemies and Targets in the sidebar who have an active bounty | [Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/bounty-bullseye/bounty-bullseye.user.js) |
 | [BUSTR: Busting Reminder](scripts/bustr/) | How many busts you have left before getting jailed, plus a hardness-sorted jail list | [Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/bustr/bustr.user.js) |
 | [Clean Player Names](scripts/clean-player-names/) | Larger, more legible player names on honor bars | [Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/clean-player-names/clean-player-names.user.js) |
@@ -32,7 +31,7 @@ Every script in this repo:
 
 - Is a **read-only helper**: no automated clicks, attacks, purchases or other in-game actions
 - Uses the **lowest API key access level** that works, and includes Torn's API key usage disclosure
-- Stores your key only locally (Tampermonkey storage) and sends it only in the `Authorization` header to `api.torn.com` (exception: Armory Notes' faction sharing sends a Public key to your faction's own server at sign-in; see [its README](scripts/armory-notes/))
+- Stores your key only locally (Tampermonkey storage) and sends it only in the `Authorization` header to `api.torn.com`
 - Rate-limits and caches its API calls, and tags them with `comment=<ScriptName>` for your key log
 
 ## Repository layout
@@ -42,7 +41,6 @@ scripts/
   <script-name>/
     <script-name>.user.js
     README.md
-    server/          (only for scripts with a backend, e.g. armory-notes)
 ```
 
 ## License
