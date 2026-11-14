@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         OC Helper
 // @namespace    torn-userscripts
-// @version      6.0.4
+// @version      6.0.5
 // @description  Overview of Organized Crimes 2.0: members not in crimes, members in each crime, and issues with any crimes. Also visible when flying.
 // @author       DadGum (based on work by callmericky [3299880])
-// @license      GPL-3.0-or-later
+// @license      GPL-3.0-only
 // @match        https://www.torn.com/*
 // @updateURL    https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/oc-helper/oc-helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/oc-helper/oc-helper.user.js
@@ -25,11 +25,15 @@
  *   never joins a crime, clicks, or submits anything for you.
  *
  * CREDITS AND LICENSE
+ *   Copyright (C) callmericky [3299880] / whatdoesthespacebardo
+ *   Modifications Copyright (C) 2026 DadGum [3158823]
+ *
  *   Modified from [TORN] OC 2.0 Helper v5.4.0 by callmericky [3299880] /
- *   whatdoesthespacebardo, licensed under GPL-3.0. Changed by DadGum on
- *   2026-11-08 as listed in the changelog below. This file is free software
- *   under the GNU General Public License, version 3 or later, with no warranty.
- *   See the LICENSE file in this script's folder.
+ *   whatdoesthespacebardo, licensed under GPL-3.0. First changed by DadGum on
+ *   2026-11-08, last changed on 2026-11-14 (6.0.5), as listed in the changelog
+ *   below. This file is free software under the GNU General Public License,
+ *   version 3 (GPL-3.0-only), with no warranty. See the LICENSE file in this
+ *   script's folder or https://www.gnu.org/licenses/gpl-3.0.html
  *
  * API KEY USAGE DISCLOSURE
  *   Data storage:        Key, settings, and cached faction, item, and success data, locally in Tampermonkey storage.
@@ -48,6 +52,8 @@
  *   Torn requests are tagged comment=OCHelper. Failures wait 5 minutes before retrying.
  *
  * CHANGELOG
+ *   6.0.5  License notices only: GPL-3.0-only (matching the original), copyright lines,
+ *          modification dates, and a link to the license text. No behavior changes.
  *   6.0.4  A manual refresh now always gets new data, even if a load is already running.
  *          The travel overview matches your faction's exact ID.
  *          Success chance lookups run at most three at a time.

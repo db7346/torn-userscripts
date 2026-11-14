@@ -54,6 +54,7 @@ Torn requests are tagged `comment=OCHelper`. Failures wait 5 minutes before retr
 
 ## Changelog
 
+- **6.0.5**: License notices only: GPL-3.0-only to match the original, copyright lines, modification dates and a link to the license text.
 - **6.0.4**: A manual refresh always gets new data, the travel overview matches your faction's exact ID, and success chance lookups run at most three at a time.
 - **6.0.3**: The overview now hides when you leave the crimes tab.
 - **6.0.2**: The key field no longer triggers the browser's save password prompt.
@@ -62,4 +63,6 @@ Torn requests are tagged `comment=OCHelper`. Failures wait 5 minutes before retr
 
 ## Credits and license
 
-Modified from [TORN] OC 2.0 Helper v5.4.0 by callmericky [3299880] / whatdoesthespacebardo. Licensed under [GPL-3.0](LICENSE), unlike the rest of this repository.
+Copyright (C) callmericky [3299880] / whatdoesthespacebardo. Modifications Copyright (C) 2026 DadGum [3158823].
+
+Modified from [[TORN] OC 2.0 Helper](https://greasyfork.org/scripts/522974) v5.4.0 by callmericky [3299880] / whatdoesthespacebardo. Licensed under [GPL-3.0-only](LICENSE) (version 3, matching the original), unlike the rest of this repository. No warranty.

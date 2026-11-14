@@ -45,4 +45,4 @@ scripts/
 
 ## License
 
-[MIT](LICENSE), except [OC Helper](scripts/oc-helper/), which is [GPL-3.0](scripts/oc-helper/LICENSE).
+[MIT](LICENSE), except [OC Helper](scripts/oc-helper/), which is [GPL-3.0-only](scripts/oc-helper/LICENSE).
