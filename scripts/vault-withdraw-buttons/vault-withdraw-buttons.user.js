@@ -1,9 +1,10 @@
 // ==UserScript==
 // @name         Vault Withdraw Buttons
 // @namespace    torn-userscripts
-// @version      6.0.1
+// @version      6.0.2
 // @description  Adds configurable withdraw presets and a Paste button to the Torn property vault.
 // @author       DadGum
+// @license      MIT
 // @match        https://www.torn.com/properties.php*
 // @updateURL    https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/vault-withdraw-buttons/vault-withdraw-buttons.user.js
 // @downloadURL  https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/vault-withdraw-buttons/vault-withdraw-buttons.user.js
@@ -34,6 +35,7 @@
  *   The API and Cache modules are omitted because this script makes no API calls.
  *
  * CHANGELOG
+ *   6.0.2  Added @license MIT (metadata only, no behavior changes).
  *   6.0.1  Presets may be separated by commas without spaces.
  *          Amounts with misplaced commas, such as 1,5m, are now rejected.
  *          Presets that do not shorten cleanly now show the full number.
