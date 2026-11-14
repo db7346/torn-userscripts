@@ -14,6 +14,7 @@ Tampermonkey userscripts for [Torn City](https://www.torn.com).
 | [Museum Set Buttons](scripts/museum-set-buttons/) | Item market tab with links to every museum flower and plushie, how many you own, and full sets | [Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/museum-set-buttons/museum-set-buttons.user.js) |
 | [OC Helper](scripts/oc-helper/) | Overview of your faction's Organized Crimes and any problems with them | [Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/oc-helper/oc-helper.user.js) |
 | [Rental Manager](scripts/rental-manager/) | Queue of rentals needing attention, with prefilled lease extensions | [Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/rental-manager/rental-manager.user.js) |
+| [Torn Crimes Helper](scripts/crimes-helper/) | Market links on missing crime items, enhancer check, guide links and a crime chain counter | [Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/crimes-helper/crimes-helper.user.js) |
 | [Treat Counter](scripts/treat-counter/) | Live Halloween treat counter in the sidebar | [Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/treat-counter/treat-counter.user.js) |
 | [Vault Withdraw Buttons](scripts/vault-withdraw-buttons/) | Preset and Paste buttons that fill the property vault withdrawal field | [Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/vault-withdraw-buttons/vault-withdraw-buttons.user.js) |
 
