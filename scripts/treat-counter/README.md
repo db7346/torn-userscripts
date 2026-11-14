@@ -6,7 +6,7 @@ Live Halloween treat counter in the Torn sidebar. Shows how many treats you have
 Treats: 134
 ```
 
-**[Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/treat-counter/treat-counter.user.js)** (requires [Tampermonkey](https://www.tampermonkey.net/))
+**[Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/treat-counter/treat-counter.user.js)** · [Greasy Fork](https://greasyfork.org/scripts/605521) (requires [Tampermonkey](https://www.tampermonkey.net/))
 
 ## Features
 

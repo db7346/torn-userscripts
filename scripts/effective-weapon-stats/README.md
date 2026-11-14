@@ -2,7 +2,7 @@
 
 Shows effective damage, accuracy, and crit chance when you open a weapon on the item page.
 
-**[Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/effective-weapon-stats/effective-weapon-stats.user.js)** (requires [Tampermonkey](https://www.tampermonkey.net/))
+**[Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/effective-weapon-stats/effective-weapon-stats.user.js)** · [Greasy Fork](https://greasyfork.org/scripts/605515) (requires [Tampermonkey](https://www.tampermonkey.net/))
 
 ## Features
 

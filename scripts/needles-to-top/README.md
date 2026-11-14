@@ -2,7 +2,7 @@
 
 Moves the Temporary items you choose to the top of your Items page's **Temporary** tab, in the order you set. By default: Tyrosine, Melatonin, Epinephrine, Serotonin.
 
-**[Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/needles-to-top/needles-to-top.user.js)** (requires [Tampermonkey](https://www.tampermonkey.net/))
+**[Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/needles-to-top/needles-to-top.user.js)** · [Greasy Fork](https://greasyfork.org/scripts/605518) (requires [Tampermonkey](https://www.tampermonkey.net/))
 
 ## Features
 

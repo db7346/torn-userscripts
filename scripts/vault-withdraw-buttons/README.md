@@ -2,7 +2,7 @@
 
 A row of withdrawal preset buttons and a Paste button on the property vault page.
 
-**[Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/vault-withdraw-buttons/vault-withdraw-buttons.user.js)** (requires [Tampermonkey](https://www.tampermonkey.net/))
+**[Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/vault-withdraw-buttons/vault-withdraw-buttons.user.js)** · [Greasy Fork](https://greasyfork.org/scripts/605522) (requires [Tampermonkey](https://www.tampermonkey.net/))
 
 ## Features
 

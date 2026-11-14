@@ -2,7 +2,7 @@
 
 On the item market, moves Torn's own **Yes** confirm button to where **Buy** was, so buying takes two clicks in the same spot. A short guard stops a double-click on Buy from confirming by accident.
 
-**[Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/market-buy-confirm/market-buy-confirm.user.js)** (requires [Tampermonkey](https://www.tampermonkey.net/))
+**[Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/market-buy-confirm/market-buy-confirm.user.js)** · [Greasy Fork](https://greasyfork.org/scripts/605516) (requires [Tampermonkey](https://www.tampermonkey.net/))
 
 ## How it works
 

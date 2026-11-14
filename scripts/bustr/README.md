@@ -2,7 +2,7 @@
 
 Shows how many busts you likely have left before getting jailed, above the jail list, and sorts the list by how hard each bust is.
 
-**[Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/bustr/bustr.user.js)** (requires [Tampermonkey](https://www.tampermonkey.net/))
+**[Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/bustr/bustr.user.js)** · [Greasy Fork](https://greasyfork.org/scripts/605512) (requires [Tampermonkey](https://www.tampermonkey.net/))
 
 ## Features
 

@@ -2,7 +2,7 @@
 
 Helpers for the Crimes 2.0 pages: market links on items you're missing, an enhancer check, forum guide links, and a crime chain counter. Works without TornTools, and the API key is optional.
 
-**[Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/crimes-helper/crimes-helper.user.js)** (requires [Tampermonkey](https://www.tampermonkey.net/))
+**[Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/crimes-helper/crimes-helper.user.js)** · [Greasy Fork](https://greasyfork.org/scripts/605514) (requires [Tampermonkey](https://www.tampermonkey.net/))
 
 ## Features
 

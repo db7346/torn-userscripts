@@ -2,7 +2,7 @@
 
 An overview of your faction's Organized Crimes 2.0: members not in a crime, members in each crime, and any problems with those crimes.
 
-**[Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/oc-helper/oc-helper.user.js)** (requires [Tampermonkey](https://www.tampermonkey.net/))
+**[Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/oc-helper/oc-helper.user.js)** · [Greasy Fork](https://greasyfork.org/scripts/605519) (requires [Tampermonkey](https://www.tampermonkey.net/))
 
 ## Features
 

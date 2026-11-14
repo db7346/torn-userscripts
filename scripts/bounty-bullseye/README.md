@@ -2,7 +2,7 @@
 
 A small bullseye next to online or idle players in your sidebar **Enemies** and **Targets** lists when they have an active bounty. Hover it for the details.
 
-**[Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/bounty-bullseye/bounty-bullseye.user.js)** (requires [Tampermonkey](https://www.tampermonkey.net/))
+**[Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/bounty-bullseye/bounty-bullseye.user.js)** · [Greasy Fork](https://greasyfork.org/scripts/605511) (requires [Tampermonkey](https://www.tampermonkey.net/))
 
 ## Features
 

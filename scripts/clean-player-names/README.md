@@ -2,7 +2,7 @@
 
 Replaces Torn's pixel honor bar names with a larger, more legible font, while keeping color outlines for staff roles and blue names.
 
-**[Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/clean-player-names/clean-player-names.user.js)** (requires [Tampermonkey](https://www.tampermonkey.net/))
+**[Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/clean-player-names/clean-player-names.user.js)** · [Greasy Fork](https://greasyfork.org/scripts/605513) (requires [Tampermonkey](https://www.tampermonkey.net/))
 
 Formerly **Torn: More Legible Player Names**. If you have that version, remove it after installing this one.
 

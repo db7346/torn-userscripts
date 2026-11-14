@@ -2,7 +2,7 @@
 
 A small tab on the item market with one-click links to every museum flower and plushie, how many of each you own, and how many full sets you can trade in.
 
-**[Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/museum-set-buttons/museum-set-buttons.user.js)** (requires [Tampermonkey](https://www.tampermonkey.net/))
+**[Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/museum-set-buttons/museum-set-buttons.user.js)** · [Greasy Fork](https://greasyfork.org/scripts/605517) (requires [Tampermonkey](https://www.tampermonkey.net/))
 
 ## Features
 

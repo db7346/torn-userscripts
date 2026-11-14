@@ -2,7 +2,7 @@
 
 A card on the properties list (and the extend/lease tabs) listing every rental that needs attention, with one-click navigation and prefilled lease extensions.
 
-**[Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/rental-manager/rental-manager.user.js)** (requires [Tampermonkey](https://www.tampermonkey.net/))
+**[Install](https://raw.githubusercontent.com/db7346/torn-userscripts/main/scripts/rental-manager/rental-manager.user.js)** · [Greasy Fork](https://greasyfork.org/scripts/605520) (requires [Tampermonkey](https://www.tampermonkey.net/))
 
 ## Features
 
