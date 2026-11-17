@@ -51,6 +51,8 @@ Every request is tagged `comment=TreatCounter` so it's identifiable in your key 
 
 ## Changelog
 
+- **1.1.2**: An error notice pops up once, not on every page load. A key that is temporarily unusable (federal jail, inactive, paused) is retried every 15 minutes instead of stopping, and the reason shows on every page while it waits. A refresh after saving a key or after a treat is never skipped.
+- **1.1.1**: The key field no longer triggers the browser's save password prompt, and Settings opens by itself only on first run.
 - **1.1.0**: Show only current treats; removed the collected/goal display and the `/torn/halloween` call.
 - **1.0.1**: Added GitHub update/download URLs for auto-updates.
 - **1.0.0**: Clean rewrite with API polling, cross-tab shared state, settings panel, collected/goal display, and full API error handling.

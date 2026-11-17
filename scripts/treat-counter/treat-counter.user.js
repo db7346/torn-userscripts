@@ -48,7 +48,8 @@
  *  Changelog
  *   1.1.2  An error notice pops up once, not on every page load. A key that is temporarily unusable
  *          (federal jail, inactive, paused) is retried every 15 minutes instead of stopping until
- *          the key is saved again. A refresh after saving a key or after a treat is never skipped.
+ *          the key is saved again, and the reason shows on every page while it waits. A refresh
+ *          after saving a key or after a treat is never skipped.
  *   1.1.1  The key field no longer triggers the browser's save password prompt.
  *          Settings opens by itself only on first run.
  *   1.1.0  Show only current treats. Removed the collected/goal display, the
@@ -127,6 +128,8 @@
         BLOCKING_ERROR: 'blockingError',
         /** Last error message shown as a pop-up notice, so it is not repeated on every page. */
         NOTIFIED: 'notifiedError',
+        /** Why polling is paused: {kind: 'limit'|'key', message}. Shown on every page while paused. */
+        PAUSE_INFO: 'pauseInfo',
         SETTINGS_SHOWN: 'settingsShown',
         LEGACY_TORN_HALLOWEEN: 'cache:tornHalloween', // used by 1.0.x; removed at startup
     });
@@ -360,6 +363,7 @@
             Storage.remove(KEYS.LEGACY_TORN_HALLOWEEN);
             Storage.remove(KEYS.LAST_FETCH);
             Storage.remove(KEYS.PAUSED_UNTIL);
+            Storage.remove(KEYS.PAUSE_INFO);
             Storage.remove(KEYS.BLOCKING_ERROR);
         },
     };
@@ -711,13 +715,15 @@
         /**
          * Sets or clears the error shown on the counter; notifies once per new message.
          * @param {string|null} message Error text, or null to clear.
+         * @param {string|null} [noticeKey] Identity of the message for the once-only pop-up.
          * @returns {void}
          */
-        setError(message) {
+        setError(message, noticeKey = message) {
             // The pop-up is shown once per new message across page loads; the counter keeps showing it.
-            if (message && message !== Storage.get(KEYS.NOTIFIED)) {
+            // noticeKey lets a message with a changing countdown count as the same message.
+            if (message && noticeKey !== Storage.get(KEYS.NOTIFIED)) {
                 UI.notice(message);
-                Storage.set(KEYS.NOTIFIED, message);
+                Storage.set(KEYS.NOTIFIED, noticeKey);
             } else if (!message) {
                 Storage.remove(KEYS.NOTIFIED);
             }
@@ -777,7 +783,11 @@
                     const access = await Settings.validateKey(key);
                     Storage.set(KEYS.API_KEY, key);
                     Storage.remove(KEYS.BLOCKING_ERROR);
-                    Storage.remove(KEYS.PAUSED_UNTIL);
+                    // A new key ends a key-problem pause; a "too many requests" back-off still applies.
+                    if (Storage.get(KEYS.PAUSE_INFO)?.kind !== 'limit') {
+                        Storage.remove(KEYS.PAUSED_UNTIL);
+                        Storage.remove(KEYS.PAUSE_INFO);
+                    }
                     UI.setError(null);
                     setStatus(`Saved. Access level: ${access}.`, 'good');
                     input.value = '';
@@ -830,6 +840,8 @@
         inFlight: false,
         /** Timer for a forced refresh moved to the end of the 15 s gap. */
         deferred: null,
+        /** Forced refresh asked for while a fetch was in flight (run when it finishes). */
+        pending: null,
 
         /**
          * Fetches /user/halloween and updates shared state, unless another tab
@@ -840,22 +852,39 @@
          * @returns {Promise<void>}
          */
         async refresh({ force = false, now = false } = {}) {
-            if (Poller.inFlight) return;
+            if (Poller.inFlight) {
+                // A forced refresh asked for during a fetch runs right after it, instead of being lost.
+                if (force) Poller.pending = { force, now: now || Poller.pending?.now };
+                return;
+            }
             if (!force && document.hidden) return;
 
             const blocking = Storage.get(KEYS.BLOCKING_ERROR);
             if (blocking) return UI.setError(blocking);
-            if (!Storage.get(KEYS.API_KEY)) return UI.setError('No API key set — click the counter to add one.');
-            if (!now && Date.now() < (Storage.get(KEYS.PAUSED_UNTIL) ?? 0)) return;
+            const key = Storage.get(KEYS.API_KEY);
+            if (!key) return UI.setError('No API key set — click the counter to add one.');
+            const pausedUntil = Storage.get(KEYS.PAUSED_UNTIL) ?? 0;
+            const pause = Storage.get(KEYS.PAUSE_INFO);
+            // A key save skips a key-problem pause, but never the "too many requests" back-off.
+            if (Date.now() < pausedUntil && !(now && pause?.kind === 'key')) {
+                if (pause?.message) {
+                    const mins = Math.max(1, Math.ceil((pausedUntil - Date.now()) / 60000));
+                    UI.setError(`${pause.message} Trying again in ${mins} min.`, pause.message);
+                }
+                return;
+            }
 
             const lastFetch = Storage.get(KEYS.LAST_FETCH) ?? 0;
             const minGap = force ? CONFIG.FORCED_REFRESH_MIN_GAP_MS : CONFIG.POLL_INTERVAL_MS - CONFIG.FRESHNESS_SLACK_MS;
             const waitMs = lastFetch + minGap - Date.now();
             if (!now && waitMs > 0) {
-                // A forced refresh (after a treat) runs at the end of the gap instead of being lost.
+                // A forced refresh (after a treat) runs at the end of the gap instead of being lost,
+                // unless another tab fetches in the meantime (then that fetch already has the treats).
                 if (force && !Poller.deferred) {
+                    const askedAt = Date.now();
                     Poller.deferred = setTimeout(() => {
                         Poller.deferred = null;
+                        if ((Storage.get(KEYS.LAST_FETCH) ?? 0) >= askedAt) return;
                         Poller.refresh({ force: true });
                     }, waitMs + 50);
                 }
@@ -866,13 +895,19 @@
             Storage.set(KEYS.LAST_FETCH, Date.now()); // claim the slot so other tabs skip
             try {
                 const current = Data.parseUserHalloween(await Api.get('/user/halloween'));
+                if (Storage.get(KEYS.API_KEY) !== key) return; // key changed meanwhile: ignore
                 State.update({ current, source: 'api' });
+                Storage.remove(KEYS.PAUSE_INFO);
                 UI.setError(null);
             } catch (err) {
-                Poller.handleError(err);
+                // A failure of a key that was replaced meanwhile says nothing about the new key.
+                if (Storage.get(KEYS.API_KEY) === key) Poller.handleError(err);
             } finally {
                 Poller.inFlight = false;
                 UI.render();
+                const pending = Poller.pending;
+                Poller.pending = null;
+                if (pending) Poller.refresh(pending);
             }
         },
 
@@ -886,9 +921,11 @@
             log('Refresh failed', code, err.message);
             if (code === 5) {
                 Storage.set(KEYS.PAUSED_UNTIL, Date.now() + CONFIG.BACKOFF_ON_LIMIT_MS);
+                Storage.set(KEYS.PAUSE_INFO, { kind: 'limit', message: err.message });
             } else if (KEY_WAIT_CODES.has(code)) {
                 Storage.set(KEYS.PAUSED_UNTIL, Date.now() + CONFIG.BACKOFF_ON_KEY_WAIT_MS);
-                return UI.setError(`${err.message} Trying again in 15 minutes.`);
+                Storage.set(KEYS.PAUSE_INFO, { kind: 'key', message: err.message });
+                return UI.setError(`${err.message} Trying again in 15 min.`, err.message);
             } else if (BLOCKING_CODES.has(code)) {
                 const msg = `${err.message} Click the counter to update your key.`;
                 Storage.set(KEYS.BLOCKING_ERROR, msg);
@@ -981,6 +1018,10 @@
      */
     async function init() {
         if (!isEventActive()) {
+            // Start next year's event clean: no remembered notice or pause.
+            Storage.remove(KEYS.NOTIFIED);
+            Storage.remove(KEYS.PAUSED_UNTIL);
+            Storage.remove(KEYS.PAUSE_INFO);
             log('Outside the Halloween event window — idle.');
             return;
         }
