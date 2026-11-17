@@ -180,7 +180,9 @@
         wrap.classList.toggle(CONFIG.CLASSES.NO_NAME, !name);
 
         if (!name) {
-            wrap.classList.remove(CONFIG.CLASSES.DONE);
+            // Guarded: remove() rewrites the class attribute even when the class is absent, which the
+            // observer would see as a change and re-sync forever.
+            if (wrap.classList.contains(CONFIG.CLASSES.DONE)) wrap.classList.remove(CONFIG.CLASSES.DONE);
             element?.remove();
             return;
         }
