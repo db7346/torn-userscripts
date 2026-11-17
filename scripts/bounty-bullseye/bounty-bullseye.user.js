@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bounty Bullseye
 // @namespace    torn-userscripts
-// @version      1.0.0
+// @version      1.0.1
 // @description  Marks online and idle players in your sidebar Enemies and Targets lists who have an active bounty.
 // @author       DadGum [3158823]
 // @license      MIT
@@ -38,6 +38,9 @@
  *   GET /v2/key/info             Only when saving a key
  *
  * CHANGELOG
+ *   1.0.1  The 6-per-minute pace is now really shared across tabs. Watches only the Enemies and
+ *          Targets lists instead of every change on the page. Keeps working after a Back/Forward
+ *          page restore. Error code 19 (Crimes 2.0) no longer stops the script and has the right text.
  *   1.0.0  First release.
  */
 
@@ -57,8 +60,12 @@
             API_KEY: 'api_key',
             RESULTS: 'results',
             SETTINGS_SHOWN: 'settings_shown',
+            /** Time of the last request from any tab, for the shared pace. */
+            LAST_REQUEST: 'last_request_at',
         }),
         CHECK_TTL_MS: 10 * 60 * 1000,
+        /** How often the page-level watcher may look for re-created lists. */
+        LIST_WATCH_MS: 500,
         RESULT_MAX_AGE_MS: 24 * 60 * 60 * 1000,
         CLAIM_MS: 30 * 1000,
         REQUEST_GAP_MS: 10 * 1000,
@@ -74,7 +81,7 @@
             PROFILE_LINK: 'a[href*="profiles.php?XID="]',
             ACTIVE_STATUS: '[fill="url(#userStatusOnline)"], [fill="url(#userStatusIdle)"]',
         }),
-        KEY_ERROR_CODES: Object.freeze([1, 2, 10, 13, 16, 18, 19]),
+        KEY_ERROR_CODES: Object.freeze([1, 2, 10, 13, 16, 18]),
         IDS: Object.freeze({ SETTINGS: 'tms-bb-settings', NOTICE: 'tms-bb-notice' }),
         CLASSES: Object.freeze({ ICON: 'tms-bb-icon' }),
         API_ERROR_MESSAGES: Object.freeze({
@@ -97,7 +104,7 @@
             16: "This key's access level is too low. Any Public key or higher works.",
             17: "Torn's API had a backend error. Try again shortly.",
             18: 'This API key is paused by its owner.',
-            19: 'This key must be migrated to the new key system.',
+            19: 'This account must migrate to Crimes 2.0 first.',
             20: 'This race has not finished yet.',
             21: 'Torn rejected the category in the request.',
             22: 'This selection is only available in API v1.',
@@ -621,6 +628,14 @@
         },
 
         /**
+         * Time of the last request from this tab or any other.
+         * @returns {number} Milliseconds since 1970.
+         */
+        lastShared() {
+            return Math.max(this.lastRequestAt, Number(Storage.get(K.LAST_REQUEST, 0)) || 0);
+        },
+
+        /**
          * Allows checks again after a key change.
          * @returns {void}
          */
@@ -640,8 +655,11 @@
             try {
                 while (this.queue.length && !this.stopped && getApiKey()) {
                     if (document.hidden) break;
-                    const wait = Math.max(this.pausedUntil, this.lastRequestAt + CONFIG.REQUEST_GAP_MS) - Date.now();
-                    if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+                    // The pace is shared: another tab's last request counts too.
+                    let wait;
+                    while ((wait = Math.max(this.pausedUntil, this.lastShared() + CONFIG.REQUEST_GAP_MS) - Date.now()) > 0) {
+                        await new Promise((resolve) => setTimeout(resolve, wait));
+                    }
                     const id = this.queue.shift();
                     if (!id || !isStillShownActive(id) || !needsCheck(Results.get(id), Date.now())) continue;
                     await this.check(id);
@@ -658,6 +676,7 @@
          */
         async check(id) {
             this.lastRequestAt = Date.now();
+            Storage.set(K.LAST_REQUEST, this.lastRequestAt);
             Results.update(id, { claimedAt: Date.now() });
             try {
                 const bounties = await fetchBounties(id);
@@ -798,6 +817,33 @@
         if (mutations.some(isListMutation)) scheduleScan();
     });
 
+    /** List elements currently watched by listObserver. */
+    let watchedLists = [];
+
+    /**
+     * Watches the Enemies and Targets lists themselves (not the whole page). Called again when Torn
+     * re-creates the sidebar, so new list elements are picked up.
+     * @returns {void}
+     */
+    function watchLists() {
+        const lists = CONFIG.LIST_IDS.map((id) => document.getElementById(id)).filter(Boolean);
+        if (lists.length === watchedLists.length && lists.every((el, i) => el === watchedLists[i])) return;
+        listObserver.disconnect();
+        lists.forEach((el) => listObserver.observe(el, { childList: true, subtree: true, attributes: true, attributeFilter: ['fill', 'class', 'href'] }));
+        watchedLists = lists;
+        scheduleScan();
+    }
+
+    /** Cheap page-level watcher: only checks whether the lists were added or replaced. */
+    let watchTimer = null;
+    const pageObserver = new MutationObserver(() => {
+        if (watchTimer) return;
+        watchTimer = setTimeout(() => {
+            watchTimer = null;
+            watchLists();
+        }, CONFIG.LIST_WATCH_MS);
+    });
+
     // =========================================================================
     // INIT
     // =========================================================================
@@ -814,17 +860,14 @@
                 Results.clear();
                 scheduleScan();
             });
-            listObserver.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['fill', 'class', 'href'] });
-            const timer = setInterval(() => {
+            pageObserver.observe(document.body, { childList: true, subtree: true });
+            watchLists();
+            setInterval(() => {
                 if (!document.hidden) scan();
             }, CONFIG.RESCAN_MS);
             document.addEventListener('visibilitychange', () => {
                 if (!document.hidden) scheduleScan();
             });
-            window.addEventListener('pagehide', () => {
-                listObserver.disconnect();
-                clearInterval(timer);
-            }, { once: true });
 
             scan();
             if (!getApiKey() && !Storage.get(K.SETTINGS_SHOWN, false)) {
