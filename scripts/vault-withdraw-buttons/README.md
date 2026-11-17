@@ -40,7 +40,7 @@ None. The script reads the vault page only and makes no network requests.
 
 ## Changelog
 
-- **6.0.3**: A comma used as a decimal point in the preset list ("1,5m") is now rejected instead of becoming a $1 and a $5m preset. Keeps working after a Back/Forward page restore.
+- **6.0.3**: A comma used as a decimal point in the preset list ("1,5m") is now rejected instead of becoming a $1 and a $5m preset, and "12,500k" is read as one amount ($12.5m). Keeps working after a Back/Forward page restore.
 - **6.0.2**: Added `@license MIT` to the script header. No behavior changes.
 - **6.0.1**: Presets may be separated by commas without spaces, misplaced commas are rejected, and awkward presets show the full number.
 - **6.0.0**: Added update and download URLs.
