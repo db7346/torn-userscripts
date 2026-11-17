@@ -17,7 +17,7 @@ Shows how many busts you likely have left before getting jailed, above the jail 
 ## Setup
 
 1. Install the script and open the jail page.
-2. The Settings panel opens. Paste a **Full Access** API key and click **Save**.
+2. The Settings panel opens. Paste a **Full Access** API key (or a Custom key with the bust log) and click **Save**.
 3. Change limits, refresh rate, a manual threshold, or the hardness and shading switches any time from the **Settings** button on the bar or the Tampermonkey menu.
 
 ## API usage
@@ -38,7 +38,7 @@ Usually 1–2 calls per minute while the jail page is open (3–4 for very activ
 | Data sharing | None; requests go only to api.torn.com |
 | Purpose of use | Estimating how many busts you can do before getting jailed |
 | Key storage & sharing | Stored locally, sent only in the Authorization header, never logged |
-| Key access level | Full Access, because Torn only shares your log with Full Access keys |
+| Key access level | Full Access (or a Custom key with the bust log), because Torn only shares your log with those keys |
 
 ## Known limitations
 
@@ -48,7 +48,7 @@ Usually 1–2 calls per minute while the jail page is open (3–4 for very activ
 
 ## Changelog
 
-- **2.1.2**: A rejected, removed or under-level key stops the refresh timer instead of retrying every minute, and Settings reopens once for an incorrect key. Only Full Access keys (or Custom keys with the bust log) can be saved. A bust made moments ago always counts, even when your PC clock is slightly behind. Keeps working after a Back/Forward page restore.
+- **2.1.2**: An incorrect, missing or under-level key stops the refresh timer instead of retrying every minute, and Settings reopens once for an incorrect key; a paused, inactive or jailed key is retried after 20 minutes and on each page load. Only Full Access keys (or Custom keys with the bust log) can be saved. A bust made moments ago always counts, even when your PC clock is slightly behind. Keeps working after a Back/Forward page restore.
 - **2.1.1**: The threshold is estimated from your most recent 100 busts, like the original.
 - **2.1.0**: Rows are shaded by your own past bust attempts.
 - **2.0.1**: With two jail tabs open, a bust is no longer counted twice.

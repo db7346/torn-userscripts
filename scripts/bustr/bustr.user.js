@@ -35,7 +35,8 @@
  *   Data sharing:        None. Requests go only to api.torn.com.
  *   Purpose of use:      Estimating how many busts you can do before getting jailed.
  *   Key storage/sharing: Stored locally, sent only in the Authorization header to api.torn.com, never logged.
- *   Key access level:    Full Access. Torn only provides your log to Full Access keys.
+ *   Key access level:    Full Access, or a Custom key with the bust log (5360). Torn only provides
+ *                        your log to those keys.
  *
  * REQUESTS (jail page only, tagged comment=BUSTR)
  *   GET /v2/user/log?log=5360&from=<72 hours ago>  Every 60 seconds (configurable) while the page is visible; shared across tabs
@@ -45,8 +46,9 @@
  *   72-hour log spans several pages), and none elsewhere.
  *
  * CHANGELOG
- *   2.1.2  A rejected, removed or under-level key stops the refresh timer (no retry every minute)
- *          and reopens Settings once for an incorrect key. Only Full Access keys (or Custom keys
+ *   2.1.2  An incorrect, missing or under-level key stops the refresh timer (no retry every minute)
+ *          and reopens Settings once for an incorrect key; a paused, inactive or jailed key is
+ *          retried after 20 minutes and on each page load. Only Full Access keys (or Custom keys
  *          with the bust log) can be saved. A bust made moments ago always counts, even when your
  *          PC clock is slightly behind Torn's. Keeps working after a Back/Forward page restore.
  *   2.1.1  The threshold is estimated from your most recent 100 busts, like the original,
@@ -86,8 +88,11 @@
             /** Set when Torn rejects the saved key; cleared when a key is saved. */
             KEY_REJECTED: 'key_rejected',
         }),
-        /** Torn error codes that mean the key itself cannot be used until it is changed or fixed. */
-        KEY_STOP_CODES: Object.freeze([1, 2, 10, 13, 16, 18]),
+        /** Torn error codes that mean the key cannot be used until it is changed: refreshing stops. */
+        KEY_STOP_CODES: Object.freeze([1, 2, 16]),
+        /** Key problems that clear by themselves (federal jail, inactive, paused): retry after a while. */
+        KEY_WAIT_CODES: Object.freeze([10, 13, 18]),
+        KEY_WAIT_MS: 20 * 60 * 1000,
         LEGACY_KEYS: Object.freeze({ API_KEY: 'bustrApiKey', STATE: 'globalBustrState' }),
         DEFAULT_SETTINGS: Object.freeze({
             redLimit: 0,
@@ -900,7 +905,7 @@
                 'data-lpignore': 'true',
                 'data-1p-ignore': 'true',
                 'aria-label': 'Torn API key',
-                placeholder: getApiKey() ? 'Key saved. Paste a new key to replace it.' : 'Full Access API key',
+                placeholder: getApiKey() ? 'Key saved. Paste a new key to replace it.' : 'Full Access API key (or Custom with the bust log)',
             },
         });
         const red = numberField('Red at this many busts left or fewer', settings.redLimit, -1000);
@@ -945,7 +950,7 @@
         const overlay = createEl('div', { id: CONFIG.IDS.SETTINGS }, [
             createEl('div', { className: 'tms-bustr-panel', attrs: { role: 'dialog', 'aria-modal': 'true', 'aria-label': 'BUSTR settings' } }, [
                 createEl('h2', { text: 'BUSTR' }),
-                createEl('div', { text: 'Needs a Full Access key, because Torn only shares your log with those. The key is stored only in Tampermonkey and sent only to api.torn.com.' }),
+                createEl('div', { text: 'Needs a Full Access key (or a Custom key with the bust log), because Torn only shares your log with those. The key is stored only in Tampermonkey and sent only to api.torn.com.' }),
                 keyInput,
                 red.label,
                 green.label,
@@ -960,7 +965,7 @@
                     onClick: () => {
                         Storage.remove(K.API_KEY);
                         Cache.clear();
-                        keyInput.placeholder = 'Full Access API key';
+                        keyInput.placeholder = 'Full Access API key (or Custom with the bust log)';
                         status.textContent = 'API key removed.';
                         Controller.restart(true);
                     },
@@ -981,8 +986,21 @@
     // CONTROLLER
     // =========================================================================
 
+    /**
+     * Bar text for a key problem, with what to do next.
+     * @param {{message: string, retryAt?: number}} entry Stored key problem.
+     * @returns {string} Text.
+     */
+    function rejectedText(entry) {
+        return entry.retryAt
+            ? `${entry.message} BUSTR tries again in about ${Math.max(1, Math.ceil((entry.retryAt - Date.now()) / 60000))} min, or save a key in Settings.`
+            : `${entry.message} Fix or replace the key in Settings to resume.`;
+    }
+
     const Controller = {
         timer: 0,
+        /** A temporary key problem has been retried once on this page load. */
+        retriedThisPage: false,
         backoffUntil: 0,
         loading: null,
         /** @type {number[]} Times (ms) of busts seen on the page but not yet confirmed by a log fetch. */
@@ -1045,9 +1063,15 @@
                 return;
             }
             if (Date.now() < this.backoffUntil) return;
+            const key = getApiKey();
             const rejected = Storage.get(K.KEY_REJECTED, null);
-            if (rejected && rejected.key === simpleHash(getApiKey())) {
-                this.error = { code: rejected.code, message: `${rejected.message} Fix or replace the key in Settings to resume.` };
+            // A temporary key problem (retryAt set) is tried again after its wait, and once per page load.
+            const retryNow = rejected?.retryAt && (Date.now() >= rejected.retryAt || !this.retriedThisPage);
+            if (retryNow) this.retriedThisPage = true;
+            if (rejected && rejected.key === simpleHash(key) && !retryNow) {
+                // No numbers next to a key error: a frozen count would be misleading.
+                this.stats = null;
+                this.error = { code: rejected.code, message: rejectedText(rejected) };
                 this.render();
                 return;
             }
@@ -1064,15 +1088,27 @@
                     ].sort((a, b) => b - a);
                     // The threshold only looks at your most recent busts, so old peaks age out.
                     const historyTimes = mergeEntries(history, recent).slice(0, CONFIG.THRESHOLD_BUSTS).map((entry) => entry.timestamp);
+                    if (getApiKey() !== key) return; // key changed while loading: the next refresh uses the new one
                     this.stats = calcStats(recentTimes, historyTimes, Math.floor(Date.now() / 1000), getSettings().customThreshold);
                     this.error = null;
+                    if (rejected) Storage.remove(K.KEY_REJECTED);
+                    // A key fixed elsewhere (another tab, or Torn's side) restarts the stopped timer.
+                    if (!this.timer) this.startTimer();
                 } catch (error) {
+                    // A failure of a key that was replaced meanwhile says nothing about the new key.
+                    if (getApiKey() !== key) return;
                     this.error = error;
                     if (error.code === 5) this.backoffUntil = Date.now() + CONFIG.BACKOFF_MS;
-                    if (CONFIG.KEY_STOP_CODES.includes(error.code)) {
-                        // The key itself is the problem: stop asking until it changes.
-                        Storage.set(K.KEY_REJECTED, { key: simpleHash(getApiKey()), code: error.code, message: error.message || 'Torn rejected the key.' });
-                        clearInterval(this.timer);
+                    const stop = CONFIG.KEY_STOP_CODES.includes(error.code);
+                    if (stop || CONFIG.KEY_WAIT_CODES.includes(error.code)) {
+                        const entry = { key: simpleHash(key), code: error.code, message: error.message || 'Torn rejected the key.', retryAt: stop ? 0 : Date.now() + CONFIG.KEY_WAIT_MS };
+                        Storage.set(K.KEY_REJECTED, entry);
+                        this.stats = null;
+                        this.error = { code: error.code, message: rejectedText(entry) };
+                        if (stop) {
+                            clearInterval(this.timer);
+                            this.timer = 0;
+                        }
                         if (error.code === 2) setTimeout(openSettings, 0);
                     }
                 } finally {
@@ -1139,8 +1175,18 @@
          */
         restart(force = false) {
             clearInterval(this.timer);
+            this.timer = 0;
             this.backoffUntil = 0;
             this.refresh(force);
+            this.startTimer();
+        },
+
+        /**
+         * Starts the refresh timer (refreshes only while the tab is visible).
+         * @returns {void}
+         */
+        startTimer() {
+            clearInterval(this.timer);
             this.timer = setInterval(() => {
                 if (!document.hidden) this.refresh();
             }, getSettings().refreshSeconds * 1000);
