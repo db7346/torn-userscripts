@@ -44,5 +44,5 @@ About one call per minute with 10 of those players online. Requests are tagged `
 
 ## Changelog
 
-- **1.0.1**: The 6-per-minute pace is now really shared across tabs. Watches only the Enemies and Targets lists instead of every change on the page. Keeps working after a Back/Forward page restore. Error code 19 no longer stops the script.
+- **1.0.1**: The 6-per-minute pace, and the pause after "too many requests", are now really shared across tabs. Watches only the Enemies and Targets lists instead of every change on the page. Keeps working after a Back/Forward page restore. Error code 19 no longer stops the script.
 - **1.0.0**: First release.
