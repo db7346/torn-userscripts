@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Clean Player Names
 // @namespace    http://tampermonkey.net/
-// @version      3.0.1
+// @version      3.0.2
 // @description  Replaces Torn's pixel honor bar names with a larger, more legible font, while maintaining color outlines for staff roles and those that opt to display blue name.
 // @author       DadGum [3158823]
 // @license      MIT
@@ -28,6 +28,9 @@
  *   The Storage, Cache, and API modules are omitted because this script uses none of them.
  *
  * CHANGELOG
+ *   3.0.2  Torn's name image is hidden only once the script has drawn the name, so a bar is never
+ *          left blank (while loading, or if something goes wrong). Keeps working after a
+ *          Back/Forward page restore.
  *   3.0.1  Torn's own name image stays visible if a player's name cannot be read.
  *   3.0.0  Renamed from Torn: More Legible Player Names.
  *          Names and outlines now update when Torn reuses a name bar.
@@ -57,7 +60,7 @@
             Object.freeze({ className: 'helper', color: '#c080ff' }),
             Object.freeze({ className: 'blue', color: '#310AF5' }),
         ]),
-        CLASSES: Object.freeze({ TEXT: 'tms-lpn-text', NO_NAME: 'tms-lpn-no-name' }),
+        CLASSES: Object.freeze({ TEXT: 'tms-lpn-text', NO_NAME: 'tms-lpn-no-name', DONE: 'tms-lpn-done' }),
         SELECTORS: Object.freeze({
             WRAP: '.honor-text-wrap',
             SPRITE: '.honor-text-svg',
@@ -136,7 +139,7 @@
                      1px  1px 0 ${outline} !important;
             }
 
-            ${CONFIG.SELECTORS.WRAP}:not(.${CONFIG.CLASSES.NO_NAME}) ${CONFIG.SELECTORS.SPRITE} {
+            ${CONFIG.SELECTORS.WRAP}.${CONFIG.CLASSES.DONE} ${CONFIG.SELECTORS.SPRITE} {
                 display: none !important;
             }
         `);
@@ -177,6 +180,7 @@
         wrap.classList.toggle(CONFIG.CLASSES.NO_NAME, !name);
 
         if (!name) {
+            wrap.classList.remove(CONFIG.CLASSES.DONE);
             element?.remove();
             return;
         }
@@ -187,6 +191,8 @@
             wrap.append(element);
         }
         if (element.textContent !== name) element.textContent = name;
+        // Only now hide Torn's name image: the readable name is in place.
+        if (!wrap.classList.contains(CONFIG.CLASSES.DONE)) wrap.classList.add(CONFIG.CLASSES.DONE);
 
         const color = getOutlineColor(Array.from(wrap.classList));
         if (element.style.getPropertyValue(CONFIG.OUTLINE_PROPERTY) !== color) {
@@ -259,7 +265,7 @@
     }
 
     /**
-     * Starts watching the page and stops when it unloads.
+     * Starts watching the page (kept after a back/forward restore, so no pagehide cleanup).
      * @returns {void}
      */
     function startObserver() {
@@ -275,7 +281,6 @@
             attributes: true,
             attributeFilter: [...CONFIG.OBSERVED_ATTRIBUTES],
         });
-        window.addEventListener('pagehide', () => observer.disconnect(), { once: true });
     }
 
     // =========================================================================
