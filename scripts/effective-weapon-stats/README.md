@@ -48,6 +48,7 @@ Every request is tagged `comment=EffectiveWeaponStats`. Failures wait 5 minutes 
 
 ## Changelog
 
+- **5.0.4**: The stats box comes back when you close and reopen the same weapon, and keeps working after the browser restores the page with Back/Forward.
 - **5.0.3**: Damage reduction and fist-only perks no longer count as weapon damage. Sub-Machine gun perks no longer count as Machine Gun perks.
 - **5.0.2**: The key field no longer triggers the browser's save password prompt.
 - **5.0.1**: Specialist now counts toward Effective Damage.

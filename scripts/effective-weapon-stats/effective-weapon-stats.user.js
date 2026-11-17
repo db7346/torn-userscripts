@@ -868,6 +868,10 @@
     let apiMeta = emptyApiMeta(NO_KEY_STATUS);
     let queued = false;
     let lastSig = "";
+    /** Times the box was put back for the current signature and panel (see update). */
+    let reinsertCount = 0;
+    /** Item panel the box was last drawn in. */
+    let lastPanel = null;
     let observerPaused = false;
     let updateDeferred = false;
     let refreshPromise = null;
@@ -2531,11 +2535,14 @@
     }
 
     /**
-     * Finds the element the stats box follows.
+     * Finds the element the stats box follows, preferring the one inside the open item panel so
+     * the box always lands in the panel that update() checks.
+     * @param {HTMLElement|null} [detailPanel] Open item panel.
      * @returns {HTMLElement|null} Wrapper.
      */
-    function getPreviewWrapper() {
-        return document.querySelector(CONFIG.SELECTORS.PREVIEW_WRAPPER);
+    function getPreviewWrapper(detailPanel) {
+        return detailPanel?.querySelector(CONFIG.SELECTORS.PREVIEW_WRAPPER)
+            || document.querySelector(CONFIG.SELECTORS.PREVIEW_WRAPPER);
     }
 
     /**
@@ -3464,7 +3471,7 @@
         const openedRow = getOpenedWeaponRow();
         const detailPanel = getDetailPanel();
         const propertiesList = getPropertiesList();
-        const previewWrapper = getPreviewWrapper();
+        const previewWrapper = getPreviewWrapper(detailPanel);
 
         if (!openedRow || !detailPanel || !propertiesList || !previewWrapper) return;
 
@@ -3515,7 +3522,18 @@
 
         // Skip only when nothing changed AND the box is still on the page: Torn rebuilds the
         // item panel when the same weapon is reopened, which removes the box.
-        if (sig === lastSig && detailPanel.querySelector("#" + CONFIG.IDS.BOX)) return;
+        // If something else keeps removing the box, put it back at most 3 times per signature and
+        // panel. A newly built panel (the weapon reopened) always gets the box again.
+        if (detailPanel !== lastPanel) {
+            lastPanel = detailPanel;
+            reinsertCount = 0;
+        }
+        if (sig === lastSig) {
+            if (detailPanel.querySelector("#" + CONFIG.IDS.BOX) || reinsertCount >= 3) return;
+            reinsertCount += 1;
+        } else {
+            reinsertCount = 0;
+        }
 
         lastSig = sig;
 
