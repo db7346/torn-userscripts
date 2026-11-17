@@ -22,5 +22,5 @@ Item market only (`page.php?sid=ItemMarket`). No API key, no network requests, n
 
 ## Changelog
 
-- **1.0.1**: Each open confirm remembers its own Buy press, so resizing the window can never move one confirm's Yes onto another row's Buy spot.
+- **1.0.1**: Each open confirm remembers its own Buy press, so resizing the window no longer moves one confirm's Yes onto another row's Buy spot. On resize, Buy is measured again instead of using an old position.
 - **1.0.0**: First version.

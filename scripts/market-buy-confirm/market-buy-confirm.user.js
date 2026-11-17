@@ -27,8 +27,9 @@
  *   This script uses no API key, makes no network requests and stores nothing.
  *
  * CHANGELOG
- *   1.0.1  Each open confirm remembers its own Buy press, so resizing the window can never move
- *          one confirm's Yes onto another row's Buy spot.
+ *   1.0.1  Each open confirm remembers its own Buy press, so resizing the window no longer moves
+ *          one confirm's Yes onto another row's Buy spot. On resize, Buy is measured again from its
+ *          row (or from the confirm, when it replaced the row) instead of using an old position.
  *   1.0.0  First version.
  */
 
@@ -84,7 +85,8 @@
     // =========================================================================
 
     /*
-     * None: the script keeps only the last Buy press in memory and makes no requests.
+     * None: the script keeps the last Buy press, and each open confirm's own press, in memory only,
+     * and makes no requests.
      */
 
     // =========================================================================
@@ -214,15 +216,24 @@
         },
 
         /**
-         * A press's Buy box now: re-measured from its row if the row is still on the page (handles
-         * resizing), otherwise as it was when pressed.
+         * A press's Buy box now (handles resizing): the Buy button measured again when its row is still
+         * on the page, else the stored offset from the confirm that took the row's place, else the box
+         * as it was when pressed.
          * @param {{buy: Box, row: ?Element, offset: ?{left: number, top: number}}} press Press.
+         * @param {?Element} [confirm] Confirm bar this press belongs to.
          * @returns {Box} Box.
          */
-        boxOf(press) {
-            if (press.row?.isConnected && press.offset) {
-                const rowBox = pageBox(press.row);
-                return { ...press.buy, left: rowBox.left + press.offset.left, top: rowBox.top + press.offset.top };
+        boxOf(press, confirm = null) {
+            if (press.row?.isConnected) {
+                const button = press.row.querySelector(S.BUY_BUTTON);
+                if (button) return pageBox(button);
+                if (press.offset) {
+                    const rowBox = pageBox(press.row);
+                    return { ...press.buy, left: rowBox.left + press.offset.left, top: rowBox.top + press.offset.top };
+                }
+            } else if (confirm?.isConnected && press.offset) {
+                const box = pageBox(confirm);
+                return { ...press.buy, left: box.left + press.offset.left, top: box.top + press.offset.top };
             }
             return press.buy;
         },
@@ -244,7 +255,7 @@
         const yes = findYes(confirm);
         if (!press || !yes) return;
         handled.set(confirm, { yes, press, readyAt: Date.now() + CONFIG.GUARD_MS });
-        moveYes(yes, Press.boxOf(press), confirm);
+        moveYes(yes, Press.boxOf(press, confirm), confirm);
         yes.classList.add(C.GUARDED);
         setTimeout(() => yes.classList.remove(C.GUARDED), CONFIG.GUARD_MS);
     }
@@ -306,7 +317,7 @@
     function replaceOpenConfirms() {
         document.querySelectorAll(S.CONFIRM).forEach((confirm) => {
             const entry = handled.get(confirm);
-            if (entry?.yes.isConnected) moveYes(entry.yes, Press.boxOf(entry.press), confirm);
+            if (entry?.yes.isConnected) moveYes(entry.yes, Press.boxOf(entry.press, confirm), confirm);
         });
     }
 
