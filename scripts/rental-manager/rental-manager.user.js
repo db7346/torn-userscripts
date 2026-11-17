@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Rental Manager
 // @namespace    dadgum.torn.rental-manager
-// @version      3.1.1
+// @version      3.1.2
 // @description  Queue of rental properties needing attention, one-click navigation, and auto-prefilled lease extensions. Torn API v2.
 // @author       DadGum (rewrite) — based on "Easy Property Rent Extension" by IceBlueFire [776] (MIT)
 // @license      MIT
@@ -53,6 +53,9 @@
  *   - /key/info         Only when saving a key
  *
  *  Changelog
+ *   3.1.2  Prefill never overwrites a price or length you typed while the terms were loading.
+ *          A Custom key without the rental logs is no longer treated as able to read them.
+ *          Amounts just under $1m / $1b now show as "$1.0m" / "$1.00b" instead of "$1000k".
  *   3.1.1  The key field no longer triggers the browser's save password prompt.
  *          Settings opens by itself only on first run.
  *   3.1.0  Card shows only on the properties list and the extend/lease tabs
@@ -136,6 +139,8 @@
     const KEYS = Object.freeze({
         API_KEY: 'apiKey',
         KEY_ACCESS: 'keyAccess',
+        /** True/false: the key can read the rental logs (set when the key is saved). */
+        KEY_LOGS: 'keyLogs',
         SETTINGS: 'settings',
         PROPERTIES: 'cache:properties',
         LOG: 'cache:log',
@@ -143,6 +148,8 @@
         SETTINGS_SHOWN: 'settingsShown',
     });
     const FILLED_ATTR = `data-${P}-filled`;
+    /** Marks an input the player has typed in, so prefill never overwrites it. */
+    const EDITED_ATTR = `data-${P}-edited`;
 
     // =========================================================================
     //  Types (shapes taken from TornAPI3.1.0.txt)
@@ -294,8 +301,9 @@
     function money(n) {
         if (!Number.isFinite(n)) return '—';
         const abs = Math.abs(n);
-        if (abs >= 1e9) return `$${(n / 1e9).toFixed(2)}b`;
-        if (abs >= 1e6) return `$${(n / 1e6).toFixed(1)}m`;
+        // Thresholds sit where rounding would roll over (999,950 would read "$1000k").
+        if (abs >= 999.95e6) return `$${(n / 1e9).toFixed(2)}b`;
+        if (abs >= 999.5e3) return `$${(n / 1e6).toFixed(1)}m`;
         if (abs >= 1e3) return `$${Math.round(n / 1e3)}k`;
         return `$${n}`;
     }
@@ -703,6 +711,9 @@
          * @returns {boolean}
          */
         canReadLogs() {
+            const logs = Storage.get(KEYS.KEY_LOGS);
+            if (typeof logs === 'boolean') return logs;
+            // Keys saved before 3.1.2 have no log flag: keep the old rule.
             const access = Storage.get(KEYS.KEY_ACCESS);
             return access === 'Full Access' || access === 'Custom';
         },
@@ -1119,9 +1130,10 @@
                     const newKey = keyInput.value.trim();
                     if (newKey) {
                         setStatus('Checking key…');
-                        const type = await Settings.validateKey(newKey);
+                        const { type, logs } = await Settings.validateKey(newKey);
                         Storage.set(KEYS.API_KEY, newKey);
                         Storage.set(KEYS.KEY_ACCESS, type);
+                        Storage.set(KEYS.KEY_LOGS, logs);
                         Cache.clearAll();
                         keyInput.value = '';
                         keyInput.placeholder = `Saved (${type}) — paste a new key to replace`;
@@ -1141,6 +1153,7 @@
             removeKey.addEventListener('click', () => {
                 Storage.remove(KEYS.API_KEY);
                 Storage.remove(KEYS.KEY_ACCESS);
+                Storage.remove(KEYS.KEY_LOGS);
                 Cache.clearAll();
                 Card.properties = null;
                 Card.load();
@@ -1169,7 +1182,11 @@
             if (type === 'Public Only' || type === 'Minimal Access') {
                 throw new Error(`This is a ${type} key — Limited Access or higher is required.`);
             }
-            return type;
+            // Full keys read every log; Custom keys only the logs they were given.
+            const available = Array.isArray(body?.info?.access?.log?.available) ? body.info.access.log.available : [];
+            const ids = new Set(available.flatMap((c) => (Array.isArray(c?.log_ids) ? c.log_ids : [])).map(Number));
+            const logs = type === 'Full Access' || CONFIG.LOG_IDS.every((id) => ids.has(id));
+            return { type, logs };
         },
     };
 
@@ -1177,10 +1194,14 @@
     //  Page features — prefill forms, happy badge
     // =========================================================================
     const Features = {
+        /** Input selectors watched by watchEdits, and its listener (added once). */
+        watched: [],
+        editListener: null,
+
         /**
-         * Sets a value on every matching input that we haven't filled yet.
-         * Marking each input means re-renders get filled once, and your own
-         * edits are never overwritten.
+         * Sets a value on every matching input that we haven't filled yet and
+         * that you haven't typed in (see watchEdits). Marking each input means
+         * re-renders get filled once, and your own edits are never overwritten.
          * @param {string} selector Input selector.
          * @param {number} value Value.
          * @returns {boolean} True if at least one input was filled.
@@ -1188,12 +1209,29 @@
         fillOnce(selector, value) {
             let filled = false;
             for (const input of document.querySelectorAll(selector)) {
-                if (input.hasAttribute(FILLED_ATTR)) continue;
+                if (input.hasAttribute(FILLED_ATTR) || input.hasAttribute(EDITED_ATTR)) continue;
                 input.value = String(value);
                 input.setAttribute(FILLED_ATTR, '1');
                 filled = true;
             }
             return filled;
+        },
+
+        /**
+         * Marks matching inputs as edited when you type in them, so a prefill that
+         * arrives later (after slow API calls) leaves them alone. Uses one capturing
+         * listener on the document, added once.
+         * @param {string[]} selectors Input selectors to watch.
+         * @returns {void}
+         */
+        watchEdits(selectors) {
+            Features.watched = Array.from(new Set([...Features.watched, ...selectors]));
+            if (Features.editListener) return;
+            Features.editListener = (event) => {
+                const t = event.target;
+                if (event.isTrusted && t instanceof HTMLInputElement && Features.watched.some((sel) => t.matches(sel))) t.setAttribute(EDITED_ATTR, '1');
+            };
+            document.addEventListener('input', Features.editListener, true);
         },
 
         /**
@@ -1238,6 +1276,7 @@
             const S = CONFIG.SELECTORS;
             const form = await waitFor(() => document.querySelector(S.EXT_COST) && document.querySelector(S.EXT_FORM));
             if (!form || readRoute().id !== propertyId) return;
+            Features.watchEdits([S.EXT_COST, S.EXT_DAYS]);
             const renterId = document.querySelector(S.EXT_RENTER_LINK)?.getAttribute('href')?.match(/XID=(\d+)/)?.[1] ?? null;
 
             const terms = await Features.extensionTerms(propertyId, renterId);
