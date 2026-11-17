@@ -44,8 +44,8 @@
  *
  * CHANGELOG
  *   2.0.1  A failed refresh waits 5 minutes before trying again (60 s after "too many requests"),
- *          and a rejected key stops refreshing until you save a key, so failures no longer retry
- *          every minute. Corrected the text for error code 19.
+ *          and a rejected key stops automatic refreshes until you save a key or press ↻ (one try),
+ *          so failures no longer retry every minute. Corrected the text for error code 19.
  *   2.0.0  Rewrite. Links open the new item market (the old market address no longer exists).
  *          Only on the item market, as a small tab instead of a fixed panel over the page. Owned
  *          counts, tradeable sets and missing items from your inventory (optional Minimal key).
@@ -715,6 +715,15 @@
         return h.toString(36);
     }
 
+    /**
+     * Footer text while the saved key is rejected.
+     * @param {string} message Torn's error text.
+     * @returns {string} Text with what to do next.
+     */
+    function rejectedMessage(message) {
+        return `${message} Counts are paused. Save a working key in Settings, or press ↻ once the problem is fixed on Torn.`;
+    }
+
     const Counts = {
         busy: false,
         error: '',
@@ -726,32 +735,44 @@
          * @returns {Promise<void>} Resolves when done.
          */
         async refresh({ force = false } = {}) {
-            if (this.busy || !getApiKey()) return;
+            const key = getApiKey();
+            if (this.busy || !key) return;
+            // A rejected key is not retried automatically. ↻ and "Clear cache" (force) try once, so a
+            // key fixed on Torn's side (unpaused, out of federal jail) can resume without re-saving.
             const rejected = Storage.get(K.KEY_REJECTED, null);
-            if (rejected && rejected.key === keyFingerprint(getApiKey())) {
-                this.error = `${rejected.message} Save a working key in Settings to resume.`;
-                render();
+            if (!force && rejected && rejected.key === keyFingerprint(key)) {
+                const message = rejectedMessage(rejected.message);
+                if (this.error !== message) {
+                    this.error = message;
+                    render();
+                }
                 return;
             }
             if (!force && (Cache.getCounts() || Date.now() < this.backoffUntil)) return;
             this.busy = true;
             try {
                 const lists = await Promise.all(CONFIG.SETS.map((set) => api.inventory(set.category)));
+                if (getApiKey() !== key) return; // key changed while loading: ignore this answer
                 Cache.setCounts(countItems(lists.flat()));
+                Storage.remove(K.KEY_REJECTED);
                 this.error = '';
             } catch (error) {
-                this.error = error.message || String(error);
+                if (getApiKey() !== key) return; // a failure of the old key says nothing about the new one
+                const message = error.message || String(error);
                 // Every failure waits before the next try, so the 60 s check never repeats a failing call.
                 this.backoffUntil = Date.now() + (error?.code === 5 ? CONFIG.BACKOFF_MS : CONFIG.FAILURE_BACKOFF_MS);
                 if (CONFIG.KEY_STOP_CODES.includes(error?.code)) {
-                    Storage.set(K.KEY_REJECTED, { key: keyFingerprint(getApiKey()), message: this.error });
-                    showNotice(this.error);
+                    Storage.set(K.KEY_REJECTED, { key: keyFingerprint(key), message });
+                    this.error = rejectedMessage(message);
+                    showNotice(message);
+                } else {
+                    this.error = message;
                 }
-                log('Count refresh failed:', this.error);
+                log('Count refresh failed:', message);
             } finally {
                 this.busy = false;
+                render();
             }
-            render();
         },
     };
 
