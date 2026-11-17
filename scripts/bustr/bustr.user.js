@@ -1103,6 +1103,7 @@
                     if (stop || CONFIG.KEY_WAIT_CODES.includes(error.code)) {
                         const entry = { key: simpleHash(key), code: error.code, message: error.message || 'Torn rejected the key.', retryAt: stop ? 0 : Date.now() + CONFIG.KEY_WAIT_MS };
                         Storage.set(K.KEY_REJECTED, entry);
+                        if (!stop) this.retriedThisPage = true; // the wait starts now; no extra retry on this page
                         this.stats = null;
                         this.error = { code: error.code, message: rejectedText(entry) };
                         if (stop) {
@@ -1114,6 +1115,8 @@
                 } finally {
                     this.loading = null;
                     this.render();
+                    // A key saved while this load ran: load again with the new key now, not in a minute.
+                    if (getApiKey() !== key && getApiKey()) setTimeout(() => this.refresh(true), 0);
                 }
             })();
             return this.loading;

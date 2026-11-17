@@ -619,6 +619,8 @@
         lastRequestAt: 0,
         /** Random id for this tab's request claims. */
         tabId: Math.random().toString(36).slice(2),
+        /** Extra random wait after losing a request slot to another tab (see takeTurn). */
+        extraDelay: 0,
         pausedUntil: 0,
         stopped: false,
 
@@ -664,7 +666,9 @@
         async takeTurn() {
             for (;;) {
                 if (document.hidden || this.stopped || !getApiKey()) return false;
-                const wait = Math.max(this.pausedShared(), this.lastShared() + CONFIG.REQUEST_GAP_MS) - Date.now();
+                // After losing a slot, this tab adds its own random delay to the shared deadline, so two
+                // tabs that woke together stop colliding on every turn.
+                const wait = Math.max(this.pausedShared(), this.lastShared() + CONFIG.REQUEST_GAP_MS) + this.extraDelay - Date.now();
                 if (wait > 0) {
                     await new Promise((resolve) => setTimeout(resolve, wait));
                     continue;
@@ -674,12 +678,15 @@
                 const { MIN, MAX } = CONFIG.CLAIM_JITTER_MS;
                 await new Promise((resolve) => setTimeout(resolve, MIN + Math.random() * (MAX - MIN)));
                 const now = Storage.get(K.LAST_REQUEST, null);
-                if (now?.tab === this.tabId && now.at === claim.at) {
-                    // Record the real send time, so the next request (any tab) waits a full gap from it.
-                    this.lastRequestAt = Date.now();
-                    Storage.set(K.LAST_REQUEST, { at: this.lastRequestAt, tab: this.tabId });
-                    return true;
+                if (now?.tab !== this.tabId || now.at !== claim.at) {
+                    this.extraDelay = Math.random() * CONFIG.REQUEST_GAP_MS;
+                    continue;
                 }
+                this.extraDelay = 0;
+                // Record the real send time, so the next request (any tab) waits a full gap from it.
+                this.lastRequestAt = Date.now();
+                Storage.set(K.LAST_REQUEST, { at: this.lastRequestAt, tab: this.tabId });
+                return true;
             }
         },
 

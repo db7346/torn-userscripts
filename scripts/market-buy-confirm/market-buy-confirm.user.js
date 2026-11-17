@@ -226,7 +226,8 @@
         boxOf(press, confirm = null) {
             if (press.row?.isConnected) {
                 const button = press.row.querySelector(S.BUY_BUTTON);
-                if (button) return pageBox(button);
+                const box = button ? pageBox(button) : null;
+                if (box && box.width > 0 && box.height > 0) return box; // a hidden Buy has a 0x0 box
                 if (press.offset) {
                     const rowBox = pageBox(press.row);
                     return { ...press.buy, left: rowBox.left + press.offset.left, top: rowBox.top + press.offset.top };

@@ -1291,8 +1291,13 @@
             const b = Features.fillOnce(S.EXT_DAYS, terms.days);
             if (a || b) {
                 document.querySelectorAll(S.EXT_SUBMIT).forEach((btn) => { btn.disabled = false; });
-                // The card names the terms only when both fields hold them (not one you typed).
-                Card.prefill = a && b ? terms : null;
+                // The card names the terms only when both fields hold them (not one you typed),
+                // whichever run filled each field.
+                const allFilled = [S.EXT_COST, S.EXT_DAYS].every((sel) => {
+                    const inputs = Array.from(document.querySelectorAll(sel));
+                    return inputs.length > 0 && inputs.every((i) => i.hasAttribute(FILLED_ATTR) && !i.hasAttribute(EDITED_ATTR));
+                });
+                Card.prefill = allFilled ? terms : null;
                 Card.render();
             }
         },

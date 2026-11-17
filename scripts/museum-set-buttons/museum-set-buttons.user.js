@@ -772,6 +772,8 @@
             } finally {
                 this.busy = false;
                 render();
+                // A key saved while this load ran: load again with the new key now, not in a minute.
+                if (getApiKey() !== key && getApiKey()) setTimeout(() => this.refresh({ force: true }), 0);
             }
         },
     };
