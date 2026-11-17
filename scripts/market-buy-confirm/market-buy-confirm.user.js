@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Market Buy Confirm
 // @namespace    dadgum.torn.market-buy-confirm
-// @version      1.0.0
+// @version      1.0.1
 // @description  On the item market, moves Torn's own "Yes" confirm button to where "Buy" was, with a short guard against accidental double-clicks.
 // @author       DadGum [3158823]
 // @license      MIT
@@ -27,6 +27,8 @@
  *   This script uses no API key, makes no network requests and stores nothing.
  *
  * CHANGELOG
+ *   1.0.1  Each open confirm remembers its own Buy press, so resizing the window can never move
+ *          one confirm's Yes onto another row's Buy spot.
  *   1.0.0  First version.
  */
 
@@ -203,13 +205,21 @@
         },
 
         /**
-         * Buy's box now: re-measured from its row if the row is still on the page (handles resizing),
-         * otherwise as it was when pressed.
-         * @returns {?Box} Box, or null when there is no recent press.
+         * The last press, if it is recent enough to belong to a confirm that is opening now.
+         * @returns {?{buy: Box, row: ?Element, offset: ?{left: number, top: number}, at: number}} Press.
          */
-        currentBuy() {
+        recent() {
             const press = this.last;
-            if (!press || Date.now() - press.at > CONFIG.PRESS_MAX_AGE_MS) return null;
+            return press && Date.now() - press.at <= CONFIG.PRESS_MAX_AGE_MS ? press : null;
+        },
+
+        /**
+         * A press's Buy box now: re-measured from its row if the row is still on the page (handles
+         * resizing), otherwise as it was when pressed.
+         * @param {{buy: Box, row: ?Element, offset: ?{left: number, top: number}}} press Press.
+         * @returns {Box} Box.
+         */
+        boxOf(press) {
             if (press.row?.isConnected && press.offset) {
                 const rowBox = pageBox(press.row);
                 return { ...press.buy, left: rowBox.left + press.offset.left, top: rowBox.top + press.offset.top };
@@ -218,7 +228,7 @@
         },
     };
 
-    /** Confirm bars handled so far, with their Yes button and when it became clickable. */
+    /** Confirm bars handled so far, with their Yes button, their own Buy press and when Yes became clickable. */
     const handled = new WeakMap();
 
     /**
@@ -230,11 +240,11 @@
     function handleConfirm(confirm) {
         if (handled.has(confirm)) return;
         if (!isBuyConfirm(confirm.querySelector(S.CONFIRM_TEXT)?.textContent)) return;
-        const buy = Press.currentBuy();
+        const press = Press.recent();
         const yes = findYes(confirm);
-        if (!buy || !yes) return;
-        handled.set(confirm, { yes, readyAt: Date.now() + CONFIG.GUARD_MS });
-        moveYes(yes, buy, confirm);
+        if (!press || !yes) return;
+        handled.set(confirm, { yes, press, readyAt: Date.now() + CONFIG.GUARD_MS });
+        moveYes(yes, Press.boxOf(press), confirm);
         yes.classList.add(C.GUARDED);
         setTimeout(() => yes.classList.remove(C.GUARDED), CONFIG.GUARD_MS);
     }
@@ -290,15 +300,13 @@
     }
 
     /**
-     * Re-places any open moved Yes after the window is resized.
+     * Re-places any open moved Yes after the window is resized, each over its own Buy spot.
      * @returns {void}
      */
     function replaceOpenConfirms() {
-        const buy = Press.currentBuy();
-        if (!buy) return;
         document.querySelectorAll(S.CONFIRM).forEach((confirm) => {
             const entry = handled.get(confirm);
-            if (entry?.yes.isConnected) moveYes(entry.yes, buy, confirm);
+            if (entry?.yes.isConnected) moveYes(entry.yes, Press.boxOf(entry.press), confirm);
         });
     }
 
