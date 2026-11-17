@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Effective Weapon Stats
 // @namespace    torn-userscripts
-// @version      5.0.3
+// @version      5.0.4
 // @description  Calculates effective Torn weapon stats on the item page using visible item data plus your Torn API perks, education, and merits.
 // @author       DadGum (based on work by BakedPotato [2889448])
 // @license      MIT
@@ -42,6 +42,8 @@
  *   Requests are tagged comment=EffectiveWeaponStats. Failures wait 5 minutes before retrying.
  *
  * CHANGELOG
+ *   5.0.4  The stats box comes back when you close a weapon and open the same one again.
+ *          Keeps working after the browser restores the page with Back/Forward.
  *   5.0.3  Damage reduction perks no longer count as weapon damage.
  *          Fist-only perks no longer count as damage on every weapon.
  *          Sub-Machine gun perks no longer count as Machine Gun perks.
@@ -3511,7 +3513,9 @@
             isBreakdownOpen() ? "open" : "closed"
         ].join("|");
 
-        if (sig === lastSig) return;
+        // Skip only when nothing changed AND the box is still on the page: Torn rebuilds the
+        // item panel when the same weapon is reopened, which removes the box.
+        if (sig === lastSig && detailPanel.querySelector("#" + CONFIG.IDS.BOX)) return;
 
         lastSig = sig;
 
@@ -3597,7 +3601,8 @@
     }
 
     /**
-     * Starts watching the page and stops when it unloads.
+     * Starts watching the page. It is not disconnected on pagehide, so it keeps working when the
+     * browser restores the page from its back/forward cache.
      * @returns {void}
      */
     function startObserver() {
@@ -3615,7 +3620,6 @@
             attributes: true,
             attributeFilter: [...CONFIG.OBSERVED_ATTRIBUTES],
         });
-        window.addEventListener("pagehide", () => observer.disconnect(), { once: true });
     }
 
     // =========================================================================
