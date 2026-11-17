@@ -30,7 +30,7 @@
  *   - Prev / Next navigation through that queue.
  *   - On the "Offer extension" tab, prefills cost and days from (in order):
  *       1. Your last agreement with this renter for this property (activity
- *          log; Full Access key only)
+ *          log; Full Access key, or a Custom key with logs 5937 and 5943)
  *       2. The renter's current lease terms
  *       3. Your default cost/days
  *   - On the "Lease" (list for rent) tab, prefills your default cost/days.
@@ -49,12 +49,13 @@
  *
  *  API budget
  *   - /user/properties  ~1 call per 5 min of use (cached), +1 per manual refresh
- *   - /user/log         Full keys only, on the extension tab, cached 10 min
+ *   - /user/log         Full (or Custom with logs 5937, 5943) only, on the extension tab, cached 10 min
  *   - /key/info         Only when saving a key
  *
  *  Changelog
  *   3.1.2  Prefill never overwrites a price or length you typed while the terms were loading.
- *          A Custom key without the rental logs is no longer treated as able to read them.
+ *          A Custom key without the rental logs is no longer treated as able to read them
+ *          (an older saved key stops trying after the first "access too low" answer).
  *          Amounts just under $1m / $1b now show as "$1.0m" / "$1.00b" instead of "$1000k".
  *   3.1.1  The key field no longer triggers the browser's save password prompt.
  *          Settings opens by itself only on first run.
@@ -583,7 +584,7 @@
         },
 
         /**
-         * Recent rental agreement/extension logs (Full key only).
+         * Recent rental agreement/extension logs (Full key, or Custom with logs 5937 and 5943).
          * @returns {Promise<UserLog[]>}
          * @throws {ApiError}
          */
@@ -1172,7 +1173,7 @@
         /**
          * Validates a key with /key/info. Requires Limited or higher (or Custom).
          * @param {string} key Candidate key.
-         * @returns {Promise<string>} Access type label.
+         * @returns {Promise<{type: string, logs: boolean}>} Access type label, and whether the key can read the rental logs.
          * @throws {ApiError|Error}
          */
         async validateKey(key) {
@@ -1208,8 +1209,11 @@
          */
         fillOnce(selector, value) {
             let filled = false;
-            for (const input of document.querySelectorAll(selector)) {
-                if (input.hasAttribute(FILLED_ATTR) || input.hasAttribute(EDITED_ATTR)) continue;
+            const inputs = Array.from(document.querySelectorAll(selector));
+            // If you typed in any matching input (Torn may keep a twin for the same field), leave them all.
+            if (inputs.some((input) => input.hasAttribute(EDITED_ATTR))) return false;
+            for (const input of inputs) {
+                if (input.hasAttribute(FILLED_ATTR)) continue;
                 input.value = String(value);
                 input.setAttribute(FILLED_ATTR, '1');
                 filled = true;
@@ -1259,6 +1263,8 @@
                     if (fromLog) return { ...fromLog, source: 'log' };
                 } catch (err) {
                     log('Log lookup failed', err.code, err.message);
+                    // Access too low (e.g. a Custom key saved before 3.1.2 without these logs): stop asking.
+                    if (err.code === 16) Storage.set(KEYS.KEY_LOGS, false);
                     if (err.code !== 5) Notice.show(`Log lookup failed: ${err.message} Using lease terms instead.`);
                 }
             }
@@ -1285,7 +1291,8 @@
             const b = Features.fillOnce(S.EXT_DAYS, terms.days);
             if (a || b) {
                 document.querySelectorAll(S.EXT_SUBMIT).forEach((btn) => { btn.disabled = false; });
-                Card.prefill = terms;
+                // The card names the terms only when both fields hold them (not one you typed).
+                Card.prefill = a && b ? terms : null;
                 Card.render();
             }
         },

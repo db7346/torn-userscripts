@@ -10,7 +10,7 @@ A card on the properties list (and the extend/lease tabs) listing every rental t
 - Each row shows the renter, cost, period, $/day and any pending extension offer, plus an **Extend →** or **List →** link
 - **Prev / Next** through the queue; the property you're viewing is highlighted
 - **Prefilled extension offers**, in this order:
-  1. Your last agreement with this renter for this property (activity log; Full Access key only)
+  1. Your last agreement with this renter for this property (activity log; Full Access key, or a Custom key with logs 5937 and 5943)
   2. The renter's current lease terms
   3. Your default cost and days
 - **Prefilled new listings** with your default cost and days
@@ -23,7 +23,7 @@ A card on the properties list (and the extend/lease tabs) listing every rental t
 
 1. Install the script and disable the old Easy Property Rent Extension if you have it.
 2. Open `properties.php`. The settings panel opens on first run.
-3. Paste an API key (**Limited Access** minimum; **Full Access** also enables prefill from your activity log).
+3. Paste an API key (**Limited Access** minimum; **Full Access**, or a Custom key with logs 5937 and 5943, also enables prefill from your activity log).
 4. Set the days threshold, default cost and days, property types and accent color, then click **Save**.
 
 Reopen settings with the ⚙ button on the card or from the Tampermonkey menu. ↻ forces a refresh.
@@ -33,7 +33,7 @@ Reopen settings with the ⚙ button on the card or from the Tampermonkey menu. �
 | Endpoint | Key level | Frequency |
 |---|---|---|
 | `GET /user/properties?filters=ownedByUser` | Limited | Cached 5 min; refreshed after you submit a lease or extension |
-| `GET /user/log?log=5937,5943` | Full (optional) | Only on the extension tab, cached 10 min |
+| `GET /user/log?log=5937,5943` | Full or Custom with logs 5937, 5943 (optional) | Only on the extension tab, cached 10 min |
 | `GET /key/info` | Any | Only when saving a key |
 
 Every request is tagged `comment=RentalManager` so it's identifiable in your key log.
@@ -46,7 +46,7 @@ Every request is tagged `comment=RentalManager` so it's identifiable in your key
 | Data sharing | None; nothing is sent anywhere except api.torn.com |
 | Purpose of use | Managing your own rental properties |
 | Key storage & sharing | Stored locally; sent only in the `Authorization` header to api.torn.com; never logged |
-| Key access level | Limited Access (Full Access optional, for log prefill) |
+| Key access level | Limited Access (Full Access, or Custom with logs 5937 and 5943, optional, for log prefill) |
 
 ## Known limitations
 
