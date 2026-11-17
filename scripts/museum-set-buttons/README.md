@@ -45,6 +45,7 @@ At most 2 calls per 15 minutes, and none on other pages or with the panel closed
 
 ## Changelog
 
+- **2.0.1**: A failed refresh waits 5 minutes before trying again, and a rejected key stops refreshing until you save a key, so failures no longer retry every minute. Corrected the text for error code 19.
 - **2.0.0**: Rewrite. Links open the new item market, the panel is a small tab on the item market only, and owned counts and full sets come from your inventory.
 
 ## Credits
