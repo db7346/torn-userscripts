@@ -28,7 +28,7 @@ Shows how many busts you likely have left before getting jailed, above the jail 
 | `GET /v2/user/log?log=5360` | Your latest 100 busts, once every 24 hours | Full |
 | `GET /v2/key/info` | When saving a key | Any |
 
-Usually 1–2 calls per minute while the jail page is open, and none on other pages. Requests are tagged `comment=BUSTR`.
+Usually 1–2 calls per minute while the jail page is open (3–4 for very active busters, whose 72-hour log spans several pages), and none on other pages. Requests are tagged `comment=BUSTR`.
 
 ### API key usage disclosure
 
@@ -48,6 +48,7 @@ Usually 1–2 calls per minute while the jail page is open, and none on other pa
 
 ## Changelog
 
+- **2.1.2**: A rejected, removed or under-level key stops the refresh timer instead of retrying every minute, and Settings reopens once for an incorrect key. Only Full Access keys (or Custom keys with the bust log) can be saved. A bust made moments ago always counts, even when your PC clock is slightly behind. Keeps working after a Back/Forward page restore.
 - **2.1.1**: The threshold is estimated from your most recent 100 busts, like the original.
 - **2.1.0**: Rows are shaded by your own past bust attempts.
 - **2.0.1**: With two jail tabs open, a bust is no longer counted twice.

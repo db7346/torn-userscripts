@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BUSTR: Busting Reminder
 // @namespace    torn-userscripts
-// @version      2.1.1
+// @version      2.1.2
 // @description  Estimates how many busts you can do without getting jailed, and sorts the jail list by how hard each bust is.
 // @author       Adobi & Ironhydedragon (rewrite by DadGum [3158823])
 // @license      MIT
@@ -41,9 +41,14 @@
  *   GET /v2/user/log?log=5360&from=<72 hours ago>  Every 60 seconds (configurable) while the page is visible; shared across tabs
  *   GET /v2/user/log?log=5360                      Your latest 100 busts, once every 24 hours, for the threshold estimate
  *   GET /v2/key/info                               Only when saving a key
- *   Usually 1-2 calls per minute while the jail page is open, and none elsewhere.
+ *   Usually 1-2 calls per minute while the jail page is open (3-4 for very active busters, whose
+ *   72-hour log spans several pages), and none elsewhere.
  *
  * CHANGELOG
+ *   2.1.2  A rejected, removed or under-level key stops the refresh timer (no retry every minute)
+ *          and reopens Settings once for an incorrect key. Only Full Access keys (or Custom keys
+ *          with the bust log) can be saved. A bust made moments ago always counts, even when your
+ *          PC clock is slightly behind Torn's. Keeps working after a Back/Forward page restore.
  *   2.1.1  The threshold is estimated from your most recent 100 busts, like the original,
  *          so an old peak stops counting once it is that far back.
  *   2.1.0  Rows are shaded by your own past attempts: green if you have busted a harder target at
@@ -78,7 +83,11 @@
             HISTORY: 'bust_history',
             SETTINGS_SHOWN: 'settings_shown',
             ATTEMPTS: 'attempts',
+            /** Set when Torn rejects the saved key; cleared when a key is saved. */
+            KEY_REJECTED: 'key_rejected',
         }),
+        /** Torn error codes that mean the key itself cannot be used until it is changed or fixed. */
+        KEY_STOP_CODES: Object.freeze([1, 2, 10, 13, 16, 18]),
         LEGACY_KEYS: Object.freeze({ API_KEY: 'bustrApiKey', STATE: 'globalBustrState' }),
         DEFAULT_SETTINGS: Object.freeze({
             redLimit: 0,
@@ -212,6 +221,17 @@
             GM_deleteValue(CONFIG.STORAGE_PREFIX + key);
         },
     };
+
+    /**
+     * Short non-reversible fingerprint of a key, so a rejected key can be recognised without storing it twice.
+     * @param {string} text Key.
+     * @returns {string} Hash.
+     */
+    function simpleHash(text) {
+        let h = 5381;
+        for (const ch of String(text || '')) h = ((h * 33) ^ ch.charCodeAt(0)) >>> 0;
+        return h.toString(36);
+    }
 
     /**
      * Reads the saved API key.
@@ -483,8 +503,9 @@
      */
     function calcPenaltyScore(timestamps, nowSeconds) {
         const score = timestamps.reduce((total, ts) => {
-            const hours = (nowSeconds - ts) / 3600;
-            return hours >= 0 && hours <= CONFIG.PENALTY.WINDOW_HOURS ? total + bustWeight(hours) : total;
+            // A bust a few seconds "in the future" means your PC clock is behind Torn's: count it as now.
+            const hours = Math.max(0, (nowSeconds - ts) / 3600);
+            return hours <= CONFIG.PENALTY.WINDOW_HOURS ? total + bustWeight(hours) : total;
         }, 0);
         return Math.floor(score);
     }
@@ -811,6 +832,17 @@
     }
 
     /**
+     * Whether a key can read the bust log: Full Access, or a Custom key given log 5360.
+     * @param {?Object} access key/info `info.access`.
+     * @returns {boolean} True when the log can be read.
+     */
+    function canReadBustLog(access) {
+        if (access?.type === 'Full Access') return true;
+        const available = Array.isArray(access?.log?.available) ? access.log.available : [];
+        return available.some((c) => Array.isArray(c?.log_ids) && c.log_ids.map(Number).includes(CONFIG.BUST_LOG_ID));
+    }
+
+    /**
      * Tests and saves a key from the Settings panel.
      * @param {HTMLInputElement} input Key field.
      * @param {HTMLElement} status Status element.
@@ -823,13 +855,15 @@
         try {
             const data = await api.get('/key/info', {}, key);
             const level = data?.info?.access?.type || 'unknown';
+            if (!canReadBustLog(data?.info?.access)) {
+                throw new Error(`This is a ${level} key. BUSTR needs a Full Access key (or a Custom key with the bust log) to read your busts.`);
+            }
             Storage.set(K.API_KEY, key);
+            Storage.remove(K.KEY_REJECTED);
             input.value = '';
             input.placeholder = 'Key saved. Paste a new key to replace it.';
             Cache.clear();
-            status.textContent = /full/i.test(level)
-                ? `Key saved (${level}).`
-                : `Key saved (${level}), but BUSTR needs a Full Access key to read your log.`;
+            status.textContent = `Key saved (${level}).`;
         } catch (error) {
             status.textContent = `Key not saved. ${error.message || error}`;
             throw error;
@@ -1011,6 +1045,12 @@
                 return;
             }
             if (Date.now() < this.backoffUntil) return;
+            const rejected = Storage.get(K.KEY_REJECTED, null);
+            if (rejected && rejected.key === simpleHash(getApiKey())) {
+                this.error = { code: rejected.code, message: `${rejected.message} Fix or replace the key in Settings to resume.` };
+                this.render();
+                return;
+            }
             if (this.loading) return this.loading;
 
             this.loading = (async () => {
@@ -1029,6 +1069,12 @@
                 } catch (error) {
                     this.error = error;
                     if (error.code === 5) this.backoffUntil = Date.now() + CONFIG.BACKOFF_MS;
+                    if (CONFIG.KEY_STOP_CODES.includes(error.code)) {
+                        // The key itself is the problem: stop asking until it changes.
+                        Storage.set(K.KEY_REJECTED, { key: simpleHash(getApiKey()), code: error.code, message: error.message || 'Torn rejected the key.' });
+                        clearInterval(this.timer);
+                        if (error.code === 2) setTimeout(openSettings, 0);
+                    }
                 } finally {
                     this.loading = null;
                     this.render();
@@ -1190,10 +1236,6 @@
             document.addEventListener('visibilitychange', () => {
                 if (!document.hidden) Controller.refresh();
             });
-            window.addEventListener('pagehide', () => {
-                pageObserver.disconnect();
-                clearInterval(Controller.timer);
-            }, { once: true });
 
             Controller.restart();
             if (!getApiKey() && !Storage.get(K.SETTINGS_SHOWN, false)) {
