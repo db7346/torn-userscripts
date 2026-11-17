@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OC Helper
 // @namespace    torn-userscripts
-// @version      6.0.5
+// @version      6.0.6
 // @description  Overview of Organized Crimes 2.0: members not in crimes, members in each crime, and issues with any crimes. Also visible when flying.
 // @author       DadGum (based on work by callmericky [3299880])
 // @license      GPL-3.0-only
@@ -52,6 +52,10 @@
  *   Torn requests are tagged comment=OCHelper. Failures wait 5 minutes before retrying.
  *
  * CHANGELOG
+ *   6.0.6  "Members available" no longer subtracts ignored members twice, and "(n ignored)"
+ *          counts only members still in the faction. The sidebar line reuses data up to
+ *          5 minutes old instead of refreshing on every page. Faction data is no longer
+ *          loaded on other players' profile pages while traveling.
  *   6.0.5  License notices only: GPL-3.0-only (matching the original), copyright lines,
  *          modification dates, and a link to the license text. No behavior changes.
  *   6.0.4  A manual refresh now always gets new data, even if a load is already running.
@@ -96,6 +100,8 @@
         }),
         TTL: Object.freeze({
             FACTION_MS: 60 * 1000,
+            /** The sidebar line accepts older data, so browsing does not refresh every minute. */
+            SIDEBAR_MS: 5 * 60 * 1000,
             KEY_INFO_MS: 7 * 24 * 60 * 60 * 1000,
             ITEM_MS: 7 * 24 * 60 * 60 * 1000,
             SCENARIOS_MS: 24 * 60 * 60 * 1000,
@@ -619,6 +625,21 @@
     }
 
     /**
+     * Faction data for the sidebar line: saved data up to TTL.SIDEBAR_MS old is used as is, so the
+     * line does not trigger a full refresh on every page you open.
+     * @returns {Promise<FactionResult>} Result.
+     * @throws {ApiRequestError} When no data is available.
+     */
+    function loadFactionForSidebar() {
+        const key = getApiKey();
+        const saved = key ? Cache.peek(CONFIG.STORAGE_KEYS.FACTION) : null;
+        if (saved?.value?.keyHash === simpleKeyHash(key) && Date.now() - saved.ts < CONFIG.TTL.SIDEBAR_MS) {
+            return Promise.resolve(toFactionResult(saved));
+        }
+        return loadFaction();
+    }
+
+    /**
      * Finds the key owner's user ID, cached for each key.
      * @returns {Promise<number|null>} User ID, or null when unavailable.
      */
@@ -820,7 +841,8 @@
                 crimeSuccess: slot.checkpoint_pass_rate,
                 crimeProgress: slot.user.progress,
             };
-            model.activeMembers += 1;
+            // Ignored members are already left out of totalMembers, so only count the others.
+            if (!model.ignored.has(String(member.id))) model.activeMembers += 1;
             if (crime.status === 'Planning' && crime.ready_at < nowSec + CONFIG.SOON_AVAILABLE_SECONDS) {
                 model.soonAvailableMembers.push(slot.user.id);
             }
@@ -898,8 +920,10 @@
      * @returns {Object} Display model.
      */
     function analyzeFaction(data, userId, settings, nowSec) {
-        const records = buildMemberRecords(data.members, new Set(settings.memberIgnoreList));
+        const ignored = new Set(settings.memberIgnoreList);
+        const records = buildMemberRecords(data.members, ignored);
         const model = {
+            ignored,
             userId,
             factionId: data.basic.id,
             members: records.members,
@@ -1682,7 +1706,8 @@
      */
     function renderFooter(footer) {
         const { model, settings } = view;
-        const ignoredCount = settings.memberIgnoreList.length;
+        const currentIds = new Set(model.allMembers.map((member) => String(member.id)));
+        const ignoredCount = settings.memberIgnoreList.filter((id) => currentIds.has(String(id))).length;
         const skipTitle = model.skippedMembers.length
             ? `Recruits unavailable for OCs:${model.skippedMembers.map((member) => `<br />${escapeTooltip(member.name)} [${member.id}]`).join('')}`
             : '';
@@ -1989,7 +2014,9 @@
         }
 
         if (viewer && !isAway()) viewer.classList.add(cls('hidden'));
-        if (viewer || !isAway() || !window.location.href.includes('ID=') || !getApiKey()) return;
+        // Only a faction page with an ID can be yours (profiles.php?XID= is a player's profile).
+        const factionPage = /\/factions\.php$/.test(window.location.pathname) && /(?:[?&#/])ID=\d+/.test(window.location.href);
+        if (viewer || !isAway() || !factionPage || !getApiKey()) return;
 
         try {
             const result = await loadFaction();
@@ -2013,7 +2040,7 @@
         if (!sidebar) return;
 
         try {
-            const model = await buildModel(await loadFaction());
+            const model = await buildModel(await loadFactionForSidebar());
             document.getElementById(CONFIG.IDS.NOTICE)?.remove();
             sidebar.append(createSidebarNotice(model.userInfo?.crimeInfo));
         } catch (error) {
