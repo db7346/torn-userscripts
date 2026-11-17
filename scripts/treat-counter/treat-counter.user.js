@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Treat Counter
 // @namespace    dadgum.torn.treats
-// @version      1.1.1
+// @version      1.1.2
 // @description  Live Halloween treat counter in the Torn sidebar, powered by the Torn API v2.
 // @author       DadGum (rewrite) — based on "Treat counter" by m0tch, Grizh, Silmaril (MIT)
 // @license      MIT
@@ -46,6 +46,9 @@
  *  tabs), plus at most 1 extra call per 15 s after an attack treat dialog.
  *
  *  Changelog
+ *   1.1.2  An error notice pops up once, not on every page load. A key that is temporarily unusable
+ *          (federal jail, inactive, paused) is retried every 15 minutes instead of stopping until
+ *          the key is saved again. A refresh after saving a key or after a treat is never skipped.
  *   1.1.1  The key field no longer triggers the browser's save password prompt.
  *          Settings opens by itself only on first run.
  *   1.1.0  Show only current treats. Removed the collected/goal display, the
@@ -71,6 +74,7 @@
         API_TIMEOUT_MS: 15000,
         RATE_LIMIT_PER_MIN: 50,            // hard cap for this script
         BACKOFF_ON_LIMIT_MS: 2 * 60 * 1000, // after error code 5
+        BACKOFF_ON_KEY_WAIT_MS: 15 * 60 * 1000, // after codes 10, 13, 18 (they clear by themselves)
 
         POLL_INTERVAL_MS: 60 * 1000,
         FRESHNESS_SLACK_MS: 5 * 1000,      // skip a poll if another tab fetched this recently
@@ -121,6 +125,8 @@
         LAST_FETCH: 'lastFetchAt',
         PAUSED_UNTIL: 'pausedUntil',
         BLOCKING_ERROR: 'blockingError',
+        /** Last error message shown as a pop-up notice, so it is not repeated on every page. */
+        NOTIFIED: 'notifiedError',
         SETTINGS_SHOWN: 'settingsShown',
         LEGACY_TORN_HALLOWEEN: 'cache:tornHalloween', // used by 1.0.x; removed at startup
     });
@@ -401,7 +407,9 @@
     });
 
     /** Codes that will not fix themselves: stop polling until the key changes. */
-    const BLOCKING_CODES = new Set([1, 2, 10, 13, 16, 18]);
+    const BLOCKING_CODES = new Set([1, 2, 16]);
+    /** Key problems that clear by themselves (federal jail, inactive, paused): wait and retry. */
+    const KEY_WAIT_CODES = new Set([10, 13, 18]);
 
     /** Error thrown for any failed API call. */
     class ApiError extends Error {
@@ -706,7 +714,13 @@
          * @returns {void}
          */
         setError(message) {
-            if (message && message !== UI.errorMessage) UI.notice(message);
+            // The pop-up is shown once per new message across page loads; the counter keeps showing it.
+            if (message && message !== Storage.get(KEYS.NOTIFIED)) {
+                UI.notice(message);
+                Storage.set(KEYS.NOTIFIED, message);
+            } else if (!message) {
+                Storage.remove(KEYS.NOTIFIED);
+            }
             UI.errorMessage = message;
             UI.render();
         },
@@ -767,7 +781,7 @@
                     UI.setError(null);
                     setStatus(`Saved. Access level: ${access}.`, 'good');
                     input.value = '';
-                    Poller.refresh({ force: true });
+                    Poller.refresh({ force: true, now: true });
                 } catch (err) {
                     setStatus(err.message, 'bad');
                 } finally {
@@ -814,25 +828,39 @@
         lastForcedAt: 0,
         /** @type {boolean} */
         inFlight: false,
+        /** Timer for a forced refresh moved to the end of the 15 s gap. */
+        deferred: null,
 
         /**
          * Fetches /user/halloween and updates shared state, unless another tab
          * fetched recently, the tab is hidden, or polling is paused/blocked.
-         * @param {{force?: boolean}} [opts] force: ignore freshness (still rate-limited).
+         * @param {{force?: boolean, now?: boolean}} [opts] force: ignore freshness (a forced refresh
+         *   inside the 15 s gap is moved to the end of the gap, not dropped); now: after a key save,
+         *   skip the gap and any pause.
          * @returns {Promise<void>}
          */
-        async refresh({ force = false } = {}) {
+        async refresh({ force = false, now = false } = {}) {
             if (Poller.inFlight) return;
             if (!force && document.hidden) return;
 
             const blocking = Storage.get(KEYS.BLOCKING_ERROR);
             if (blocking) return UI.setError(blocking);
             if (!Storage.get(KEYS.API_KEY)) return UI.setError('No API key set — click the counter to add one.');
-            if (Date.now() < (Storage.get(KEYS.PAUSED_UNTIL) ?? 0)) return;
+            if (!now && Date.now() < (Storage.get(KEYS.PAUSED_UNTIL) ?? 0)) return;
 
             const lastFetch = Storage.get(KEYS.LAST_FETCH) ?? 0;
             const minGap = force ? CONFIG.FORCED_REFRESH_MIN_GAP_MS : CONFIG.POLL_INTERVAL_MS - CONFIG.FRESHNESS_SLACK_MS;
-            if (Date.now() - lastFetch < minGap) return;
+            const waitMs = lastFetch + minGap - Date.now();
+            if (!now && waitMs > 0) {
+                // A forced refresh (after a treat) runs at the end of the gap instead of being lost.
+                if (force && !Poller.deferred) {
+                    Poller.deferred = setTimeout(() => {
+                        Poller.deferred = null;
+                        Poller.refresh({ force: true });
+                    }, waitMs + 50);
+                }
+                return;
+            }
 
             Poller.inFlight = true;
             Storage.set(KEYS.LAST_FETCH, Date.now()); // claim the slot so other tabs skip
@@ -858,6 +886,9 @@
             log('Refresh failed', code, err.message);
             if (code === 5) {
                 Storage.set(KEYS.PAUSED_UNTIL, Date.now() + CONFIG.BACKOFF_ON_LIMIT_MS);
+            } else if (KEY_WAIT_CODES.has(code)) {
+                Storage.set(KEYS.PAUSED_UNTIL, Date.now() + CONFIG.BACKOFF_ON_KEY_WAIT_MS);
+                return UI.setError(`${err.message} Trying again in 15 minutes.`);
             } else if (BLOCKING_CODES.has(code)) {
                 const msg = `${err.message} Click the counter to update your key.`;
                 Storage.set(KEYS.BLOCKING_ERROR, msg);
