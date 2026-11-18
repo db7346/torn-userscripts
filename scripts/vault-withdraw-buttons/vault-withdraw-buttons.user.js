@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Vault Withdraw Buttons
 // @namespace    torn-userscripts
-// @version      6.0.2
+// @version      6.0.3
 // @description  Adds configurable withdraw presets and a Paste button to the Torn property vault.
 // @author       DadGum
 // @license      MIT
@@ -35,6 +35,8 @@
  *   The API and Cache modules are omitted because this script makes no API calls.
  *
  * CHANGELOG
+ *   6.0.3  A comma used as a decimal point in the preset list ("1,5m") is now rejected instead of
+ *          becoming a $1 and a $5m preset, and "12,500k" is read as one amount ($12.5m). Keeps working after a Back/Forward page restore.
  *   6.0.2  Added @license MIT (metadata only, no behavior changes).
  *   6.0.1  Presets may be separated by commas without spaces.
  *          Amounts with misplaced commas, such as 1,5m, are now rejected.
@@ -215,9 +217,13 @@
      * @returns {{presets: number[], error: string|null}} Parsed unique presets or an error.
      */
     function parsePresetList(text) {
+        // "1,5m" is a decimal written with a comma, not two presets: ask for a dot instead.
+        // (Skipped only when a digit comes before the comma, as in "1,000,5m"; after a letter it's a list.)
+        const decimalComma = /(?<!\d)(?<!\d,)\d+,\d{1,2}[kmbt]/i.exec(String(text));
+        if (decimalComma) return { presets: [], error: `Use a dot for decimals: ${decimalComma[0].replace(',', '.')}` };
         // A comma stays inside a token only when it is a thousands separator.
         const tokens = String(text).split(/[\s;]+/)
-            .flatMap((chunk) => chunk.split(/(?<!\d),|,(?!\d{3}(?:,|$))/))
+            .flatMap((chunk) => chunk.split(/(?<!\d),|,(?!\d{3}(?:[kmbt]?(?:,|$)))/i))
             .filter(Boolean);
         if (!tokens.length) return { presets: [], error: 'Enter at least one preset.' };
 
@@ -771,10 +777,6 @@
             injectStyles();
             GM_registerMenuCommand('Settings', openSettings);
             window.addEventListener('hashchange', syncObserver);
-            window.addEventListener('pagehide', () => {
-                pageObserver.disconnect();
-                observing = false;
-            });
             syncObserver();
         } catch (error) {
             console.error('[Vault Withdraw Buttons] Failed to start.', error);
