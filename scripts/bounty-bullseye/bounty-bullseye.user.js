@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bounty Bullseye
 // @namespace    torn-userscripts
-// @version      1.0.0
+// @version      1.0.1
 // @description  Marks online and idle players in your sidebar Enemies and Targets lists who have an active bounty.
 // @author       DadGum [3158823]
 // @license      MIT
@@ -38,6 +38,10 @@
  *   GET /v2/key/info             Only when saving a key
  *
  * CHANGELOG
+ *   1.0.1  The 6-per-minute pace, and the pause after "too many requests", are now really shared
+ *          across tabs. Watches only the Enemies and Targets lists instead of every change on the
+ *          page. Keeps working after a Back/Forward page restore. Error code 19 (Crimes 2.0) no
+ *          longer stops the script and has the right text.
  *   1.0.0  First release.
  */
 
@@ -57,11 +61,19 @@
             API_KEY: 'api_key',
             RESULTS: 'results',
             SETTINGS_SHOWN: 'settings_shown',
+            /** Time of the last request from any tab, for the shared pace. */
+            LAST_REQUEST: 'last_request_at',
+            /** Rate-limit pause shared by all tabs (after error code 5). */
+            PAUSED_UNTIL: 'paused_until',
         }),
         CHECK_TTL_MS: 10 * 60 * 1000,
+        /** How often the page-level watcher may look for re-created lists. */
+        LIST_WATCH_MS: 500,
         RESULT_MAX_AGE_MS: 24 * 60 * 60 * 1000,
         CLAIM_MS: 30 * 1000,
         REQUEST_GAP_MS: 10 * 1000,
+        /** Random wait before confirming a claimed request slot, so tabs that wake together don't both send. */
+        CLAIM_JITTER_MS: Object.freeze({ MIN: 50, MAX: 250 }),
         BACKOFF_MS: 60 * 1000,
         RESCAN_MS: 60 * 1000,
         OBSERVER_DEBOUNCE_MS: 250,
@@ -74,7 +86,7 @@
             PROFILE_LINK: 'a[href*="profiles.php?XID="]',
             ACTIVE_STATUS: '[fill="url(#userStatusOnline)"], [fill="url(#userStatusIdle)"]',
         }),
-        KEY_ERROR_CODES: Object.freeze([1, 2, 10, 13, 16, 18, 19]),
+        KEY_ERROR_CODES: Object.freeze([1, 2, 10, 13, 16, 18]),
         IDS: Object.freeze({ SETTINGS: 'tms-bb-settings', NOTICE: 'tms-bb-notice' }),
         CLASSES: Object.freeze({ ICON: 'tms-bb-icon' }),
         API_ERROR_MESSAGES: Object.freeze({
@@ -97,7 +109,7 @@
             16: "This key's access level is too low. Any Public key or higher works.",
             17: "Torn's API had a backend error. Try again shortly.",
             18: 'This API key is paused by its owner.',
-            19: 'This key must be migrated to the new key system.',
+            19: 'This account must migrate to Crimes 2.0 first.',
             20: 'This race has not finished yet.',
             21: 'Torn rejected the category in the request.',
             22: 'This selection is only available in API v1.',
@@ -605,6 +617,10 @@
         queue: [],
         running: false,
         lastRequestAt: 0,
+        /** Random id for this tab's request claims. */
+        tabId: Math.random().toString(36).slice(2),
+        /** Extra random wait after losing a request slot to another tab (see takeTurn). */
+        extraDelay: 0,
         pausedUntil: 0,
         stopped: false,
 
@@ -618,6 +634,60 @@
                 if (!this.queue.includes(id)) this.queue.push(id);
             });
             this.run();
+        },
+
+        /**
+         * Time of the last request from this tab or any other.
+         * @returns {number} Milliseconds since 1970.
+         */
+        lastShared() {
+            const stored = Storage.get(K.LAST_REQUEST, null);
+            const at = Number(stored?.at ?? stored) || 0;
+            // A stored time in the future (clock set back) is ignored instead of stalling every tab.
+            const valid = at <= Date.now() + CONFIG.REQUEST_GAP_MS ? at : 0;
+            return Math.max(this.lastRequestAt, valid);
+        },
+
+        /**
+         * Rate-limit pause from this tab or any other (after code 5).
+         * @returns {number} Milliseconds since 1970 until which no request is sent.
+         */
+        pausedShared() {
+            const stored = Number(Storage.get(K.PAUSED_UNTIL, 0)) || 0;
+            const valid = stored <= Date.now() + CONFIG.BACKOFF_MS ? stored : 0;
+            return Math.max(this.pausedUntil, valid);
+        },
+
+        /**
+         * Waits for this tab's turn under the shared pace: wait until the slot is free, claim it
+         * with a random tab id, wait a moment, and send only if the claim is still ours.
+         * @returns {Promise<boolean>} True when this tab may send now; false when it should stop.
+         */
+        async takeTurn() {
+            for (;;) {
+                if (document.hidden || this.stopped || !getApiKey()) return false;
+                // After losing a slot, this tab adds its own random delay to the shared deadline, so two
+                // tabs that woke together stop colliding on every turn.
+                const wait = Math.max(this.pausedShared(), this.lastShared() + CONFIG.REQUEST_GAP_MS) + this.extraDelay - Date.now();
+                if (wait > 0) {
+                    await new Promise((resolve) => setTimeout(resolve, wait));
+                    continue;
+                }
+                const claim = { at: Date.now(), tab: this.tabId };
+                Storage.set(K.LAST_REQUEST, claim);
+                const { MIN, MAX } = CONFIG.CLAIM_JITTER_MS;
+                await new Promise((resolve) => setTimeout(resolve, MIN + Math.random() * (MAX - MIN)));
+                const now = Storage.get(K.LAST_REQUEST, null);
+                if (now?.tab !== this.tabId || now.at !== claim.at) {
+                    this.extraDelay = Math.random() * CONFIG.REQUEST_GAP_MS;
+                    continue;
+                }
+                this.extraDelay = 0;
+                // Record the real send time, so the next request (any tab) waits a full gap from it.
+                this.lastRequestAt = Date.now();
+                Storage.set(K.LAST_REQUEST, { at: this.lastRequestAt, tab: this.tabId });
+                return true;
+            }
         },
 
         /**
@@ -639,11 +709,16 @@
             this.running = true;
             try {
                 while (this.queue.length && !this.stopped && getApiKey()) {
-                    if (document.hidden) break;
-                    const wait = Math.max(this.pausedUntil, this.lastRequestAt + CONFIG.REQUEST_GAP_MS) - Date.now();
-                    if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
-                    const id = this.queue.shift();
-                    if (!id || !isStillShownActive(id) || !needsCheck(Results.get(id), Date.now())) continue;
+                    // Skip players who no longer need a check before taking a request slot.
+                    const id = this.queue[0];
+                    if (!id || !isStillShownActive(id) || !needsCheck(Results.get(id), Date.now())) {
+                        this.queue.shift();
+                        continue;
+                    }
+                    // The pace is shared by all tabs.
+                    if (!(await this.takeTurn())) break;
+                    this.queue.shift();
+                    if (!isStillShownActive(id) || !needsCheck(Results.get(id), Date.now())) continue;
                     await this.check(id);
                 }
             } finally {
@@ -657,7 +732,6 @@
          * @returns {Promise<void>} Resolves when finished.
          */
         async check(id) {
-            this.lastRequestAt = Date.now();
             Results.update(id, { claimedAt: Date.now() });
             try {
                 const bounties = await fetchBounties(id);
@@ -667,6 +741,7 @@
                 log('Check failed', error);
                 if (error.code === 5) {
                     this.pausedUntil = Date.now() + CONFIG.BACKOFF_MS;
+                    Storage.set(K.PAUSED_UNTIL, this.pausedUntil);
                     this.queue.unshift(id);
                     Results.update(id, { claimedAt: 0 });
                 } else if (CONFIG.KEY_ERROR_CODES.includes(error.code)) {
@@ -798,6 +873,33 @@
         if (mutations.some(isListMutation)) scheduleScan();
     });
 
+    /** List elements currently watched by listObserver. */
+    let watchedLists = [];
+
+    /**
+     * Watches the Enemies and Targets lists themselves (not the whole page). Called again when Torn
+     * re-creates the sidebar, so new list elements are picked up.
+     * @returns {void}
+     */
+    function watchLists() {
+        const lists = CONFIG.LIST_IDS.map((id) => document.getElementById(id)).filter(Boolean);
+        if (lists.length === watchedLists.length && lists.every((el, i) => el === watchedLists[i])) return;
+        listObserver.disconnect();
+        lists.forEach((el) => listObserver.observe(el, { childList: true, subtree: true, attributes: true, attributeFilter: ['fill', 'class', 'href'] }));
+        watchedLists = lists;
+        scheduleScan();
+    }
+
+    /** Cheap page-level watcher: only checks whether the lists were added or replaced. */
+    let watchTimer = null;
+    const pageObserver = new MutationObserver(() => {
+        if (watchTimer) return;
+        watchTimer = setTimeout(() => {
+            watchTimer = null;
+            watchLists();
+        }, CONFIG.LIST_WATCH_MS);
+    });
+
     // =========================================================================
     // INIT
     // =========================================================================
@@ -814,17 +916,14 @@
                 Results.clear();
                 scheduleScan();
             });
-            listObserver.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['fill', 'class', 'href'] });
-            const timer = setInterval(() => {
+            pageObserver.observe(document.body, { childList: true, subtree: true });
+            watchLists();
+            setInterval(() => {
                 if (!document.hidden) scan();
             }, CONFIG.RESCAN_MS);
             document.addEventListener('visibilitychange', () => {
                 if (!document.hidden) scheduleScan();
             });
-            window.addEventListener('pagehide', () => {
-                listObserver.disconnect();
-                clearInterval(timer);
-            }, { once: true });
 
             scan();
             if (!getApiKey() && !Storage.get(K.SETTINGS_SHOWN, false)) {
