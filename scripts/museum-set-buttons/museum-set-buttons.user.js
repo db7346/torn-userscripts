@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Museum Set Buttons
 // @namespace    dadgum.torn.museum-set-buttons
-// @version      2.0.0
+// @version      2.0.1
 // @description  A small tab on the item market with one-click links to every museum flower and plushie, how many of each you own, and how many full sets you can trade in.
 // @author       Titanic_ [2968477] (rewrite by DadGum [3158823])
 // @license      MIT
@@ -43,6 +43,9 @@
  *   At most 2 calls per 15 minutes, and none on other pages.
  *
  * CHANGELOG
+ *   2.0.1  A failed refresh waits 5 minutes before trying again (60 s after "too many requests"),
+ *          and a rejected key stops automatic refreshes until you save a key or press ↻ (one try),
+ *          so failures no longer retry every minute. Corrected the text for error code 19.
  *   2.0.0  Rewrite. Links open the new item market (the old market address no longer exists).
  *          Only on the item market, as a small tab instead of a fixed panel over the page. Owned
  *          counts, tradeable sets and missing items from your inventory (optional Minimal key).
@@ -68,7 +71,13 @@
             SETTINGS_SHOWN: 'settings_shown',
             UI: 'ui',
             COUNTS: 'counts',
+            /** Set when Torn rejects the saved key; cleared when a key is saved. */
+            KEY_REJECTED: 'key_rejected',
         }),
+        /** Wait after any other failed refresh (network, Torn down, temporary errors). */
+        FAILURE_BACKOFF_MS: 5 * 60 * 1000,
+        /** Torn error codes that mean the key cannot be used until it is changed or fixed. */
+        KEY_STOP_CODES: Object.freeze([1, 2, 10, 13, 16, 18]),
         /** Torn caches inventory for 15 minutes, so asking more often returns the same data. */
         COUNTS_TTL_MS: 15 * 60 * 1000,
         BACKOFF_MS: 60 * 1000,
@@ -120,7 +129,7 @@
             16: "This key's access level is too low. Owned counts need a Minimal Access key.",
             17: "Torn's API had a backend error. Try again shortly.",
             18: 'This API key is paused by its owner.',
-            19: 'This key must be migrated to the new key system.',
+            19: 'This account must migrate to Crimes 2.0 first.',
             20: 'This race has not finished yet.',
             21: 'Torn rejected the category in the request.',
             22: 'This selection is only available in API v1.',
@@ -626,6 +635,8 @@
                 return false;
             }
             Storage.set(K.API_KEY, key);
+            Storage.remove(K.KEY_REJECTED);
+            Counts.backoffUntil = 0;
             Cache.clear();
             input.value = '';
             input.placeholder = 'Key saved. Paste a new key to replace it.';
@@ -693,6 +704,26 @@
     // COUNTS (inventory refresh)
     // =========================================================================
 
+    /**
+     * Short non-reversible fingerprint of a key, so a rejected key is recognised without storing it again.
+     * @param {string} key API key.
+     * @returns {string} Fingerprint.
+     */
+    function keyFingerprint(key) {
+        let h = 5381;
+        for (const ch of String(key || '')) h = ((h * 33) ^ ch.charCodeAt(0)) >>> 0;
+        return h.toString(36);
+    }
+
+    /**
+     * Footer text while the saved key is rejected.
+     * @param {string} message Torn's error text.
+     * @returns {string} Text with what to do next.
+     */
+    function rejectedMessage(message) {
+        return `${message} Counts are paused. Save a working key in Settings, or press ↻ once the problem is fixed on Torn.`;
+    }
+
     const Counts = {
         busy: false,
         error: '',
@@ -704,22 +735,46 @@
          * @returns {Promise<void>} Resolves when done.
          */
         async refresh({ force = false } = {}) {
-            if (this.busy || !getApiKey()) return;
+            const key = getApiKey();
+            if (this.busy || !key) return;
+            // A rejected key is not retried automatically. ↻ and "Clear cache" (force) try once, so a
+            // key fixed on Torn's side (unpaused, out of federal jail) can resume without re-saving.
+            const rejected = Storage.get(K.KEY_REJECTED, null);
+            if (!force && rejected && rejected.key === keyFingerprint(key)) {
+                const message = rejectedMessage(rejected.message);
+                if (this.error !== message) {
+                    this.error = message;
+                    render();
+                }
+                return;
+            }
             if (!force && (Cache.getCounts() || Date.now() < this.backoffUntil)) return;
             this.busy = true;
             try {
                 const lists = await Promise.all(CONFIG.SETS.map((set) => api.inventory(set.category)));
+                if (getApiKey() !== key) return; // key changed while loading: ignore this answer
                 Cache.setCounts(countItems(lists.flat()));
+                Storage.remove(K.KEY_REJECTED);
                 this.error = '';
             } catch (error) {
-                this.error = error.message || String(error);
-                if (error?.code === 5) this.backoffUntil = Date.now() + CONFIG.BACKOFF_MS;
-                if (error?.code === 2 || error?.code === 16) showNotice(this.error);
-                log('Count refresh failed:', this.error);
+                if (getApiKey() !== key) return; // a failure of the old key says nothing about the new one
+                const message = error.message || String(error);
+                // Every failure waits before the next try, so the 60 s check never repeats a failing call.
+                this.backoffUntil = Date.now() + (error?.code === 5 ? CONFIG.BACKOFF_MS : CONFIG.FAILURE_BACKOFF_MS);
+                if (CONFIG.KEY_STOP_CODES.includes(error?.code)) {
+                    Storage.set(K.KEY_REJECTED, { key: keyFingerprint(key), message });
+                    this.error = rejectedMessage(message);
+                    showNotice(message);
+                } else {
+                    this.error = message;
+                }
+                log('Count refresh failed:', message);
             } finally {
                 this.busy = false;
+                render();
+                // A key saved while this load ran: load again with the new key now, not in a minute.
+                if (getApiKey() !== key && getApiKey()) setTimeout(() => this.refresh({ force: true }), 0);
             }
-            render();
         },
     };
 
