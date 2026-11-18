@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Effective Weapon Stats
 // @namespace    torn-userscripts
-// @version      5.0.3
+// @version      5.0.4
 // @description  Calculates effective Torn weapon stats on the item page using visible item data plus your Torn API perks, education, and merits.
 // @author       DadGum (based on work by BakedPotato [2889448])
 // @license      MIT
@@ -42,6 +42,8 @@
  *   Requests are tagged comment=EffectiveWeaponStats. Failures wait 5 minutes before retrying.
  *
  * CHANGELOG
+ *   5.0.4  The stats box comes back when you close a weapon and open the same one again.
+ *          Keeps working after the browser restores the page with Back/Forward.
  *   5.0.3  Damage reduction perks no longer count as weapon damage.
  *          Fist-only perks no longer count as damage on every weapon.
  *          Sub-Machine gun perks no longer count as Machine Gun perks.
@@ -866,6 +868,10 @@
     let apiMeta = emptyApiMeta(NO_KEY_STATUS);
     let queued = false;
     let lastSig = "";
+    /** Times the box was put back for the current signature and panel (see update). */
+    let reinsertCount = 0;
+    /** Item panel the box was last drawn in. */
+    let lastPanel = null;
     let observerPaused = false;
     let updateDeferred = false;
     let refreshPromise = null;
@@ -2529,11 +2535,14 @@
     }
 
     /**
-     * Finds the element the stats box follows.
+     * Finds the element the stats box follows, preferring the one inside the open item panel so
+     * the box always lands in the panel that update() checks.
+     * @param {HTMLElement|null} [detailPanel] Open item panel.
      * @returns {HTMLElement|null} Wrapper.
      */
-    function getPreviewWrapper() {
-        return document.querySelector(CONFIG.SELECTORS.PREVIEW_WRAPPER);
+    function getPreviewWrapper(detailPanel) {
+        return detailPanel?.querySelector(CONFIG.SELECTORS.PREVIEW_WRAPPER)
+            || document.querySelector(CONFIG.SELECTORS.PREVIEW_WRAPPER);
     }
 
     /**
@@ -3462,7 +3471,7 @@
         const openedRow = getOpenedWeaponRow();
         const detailPanel = getDetailPanel();
         const propertiesList = getPropertiesList();
-        const previewWrapper = getPreviewWrapper();
+        const previewWrapper = getPreviewWrapper(detailPanel);
 
         if (!openedRow || !detailPanel || !propertiesList || !previewWrapper) return;
 
@@ -3511,7 +3520,20 @@
             isBreakdownOpen() ? "open" : "closed"
         ].join("|");
 
-        if (sig === lastSig) return;
+        // Skip only when nothing changed AND the box is still on the page: Torn rebuilds the
+        // item panel when the same weapon is reopened, which removes the box.
+        // If something else keeps removing the box, put it back at most 3 times per signature and
+        // panel. A newly built panel (the weapon reopened) always gets the box again.
+        if (detailPanel !== lastPanel) {
+            lastPanel = detailPanel;
+            reinsertCount = 0;
+        }
+        if (sig === lastSig) {
+            if (detailPanel.querySelector("#" + CONFIG.IDS.BOX) || reinsertCount >= 3) return;
+            reinsertCount += 1;
+        } else {
+            reinsertCount = 0;
+        }
 
         lastSig = sig;
 
@@ -3597,7 +3619,8 @@
     }
 
     /**
-     * Starts watching the page and stops when it unloads.
+     * Starts watching the page. It is not disconnected on pagehide, so it keeps working when the
+     * browser restores the page from its back/forward cache.
      * @returns {void}
      */
     function startObserver() {
@@ -3615,7 +3638,6 @@
             attributes: true,
             attributeFilter: [...CONFIG.OBSERVED_ATTRIBUTES],
         });
-        window.addEventListener("pagehide", () => observer.disconnect(), { once: true });
     }
 
     // =========================================================================
