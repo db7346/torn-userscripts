@@ -54,6 +54,7 @@ Torn requests are tagged `comment=OCHelper`. Failures wait 5 minutes before retr
 
 ## Changelog
 
+- **6.0.6**: "Members available" no longer subtracts ignored members twice, and "(n ignored)" counts only current members. The sidebar line reuses data up to 5 minutes old instead of refreshing on every page. Faction data is no longer loaded on other players' profiles while traveling.
 - **6.0.5**: License notices only: GPL-3.0-only to match the original, copyright lines, modification dates and a link to the license text.
 - **6.0.4**: A manual refresh always gets new data, the travel overview matches your faction's exact ID, and success chance lookups run at most three at a time.
 - **6.0.3**: The overview now hides when you leave the crimes tab.
